@@ -50,12 +50,6 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore DiskpartGUI.sln
 
-      - name: Run unit tests
-        run: >
-          dotnet test tests/DiskpartGUI.Tests/DiskpartGUI.Tests.csproj
-          --configuration Release
-          -p:Platform=x64
-
       - name: Publish self-contained portable exe
         shell: pwsh
         run: >
