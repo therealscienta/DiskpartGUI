@@ -111,12 +111,14 @@ Pre-release suffix examples: `v1.2.0-beta.1`, `v1.2.0-rc.1` (GitHub marks these 
 2. Apply the bump rules above — if multiple change types, use the **highest** bump
 3. Decide on the new version string (e.g. `1.1.0`)
 4. Run `dotnet test` one last time to confirm all tests pass
-5. Tag and push:
+5. Tag the commit and push the tag:
    ```bash
    git tag v1.1.0
    git push origin v1.1.0
    ```
    The `release.yml` workflow fires automatically, patches the csproj, builds, and creates the GitHub Release.
+
+> **Always tag every release commit.** Every commit that represents a releasable change must have a `v*` tag pushed to origin. The tag is what triggers the release workflow — without it no GitHub Release is created and the csproj version is never patched. Never ship a release by pushing to `main` alone.
 
 The `<Version>` in `DiskpartGUI.csproj` always stays at the last released value in the repo (or `1.0.0` initially). You do **not** manually edit it — CI does.
 
