@@ -1,0 +1,70 @@
+<Window x:Class="DiskpartGUI.Views.Dialogs.ResizePartitionDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:DiskpartGUI.Converters"
+        Title="Resize Partition"
+        Width="440" Height="320"
+        Background="#16213E"
+        Foreground="#ECF0F1"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../../Resources/Styles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <converters:BoolToVisibilityConverter x:Key="BoolToVis"/>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Resize Partition" FontSize="16" FontWeight="SemiBold"
+                   Foreground="#ECF0F1" Margin="0,0,0,20"/>
+
+        <StackPanel Grid.Row="1">
+            <TextBlock Style="{StaticResource FieldLabelStyle}"
+                       Text="{Binding CurrentSizeMb, StringFormat='Current size: {0:N0} MB'}"/>
+
+            <TextBlock Style="{StaticResource FieldLabelStyle}" Text="New size (MB)" Margin="0,12,0,2"/>
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Slider Grid.Column="0" Minimum="{Binding MinNewSizeMb}" Maximum="{Binding MaxSizeMb}"
+                        Value="{Binding NewSizeMb, Mode=TwoWay}"
+                        VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <TextBox Grid.Column="1" Width="90"
+                         Text="{Binding NewSizeMb, UpdateSourceTrigger=PropertyChanged}"
+                         Background="#1A1A2E" Foreground="#ECF0F1"
+                         BorderBrush="#34495E" Padding="6,4"/>
+            </Grid>
+
+            <TextBlock Foreground="#2F80ED" FontSize="13" FontWeight="SemiBold"
+                       Text="{Binding OperationDescription}" Margin="0,4,0,0"/>
+
+            <TextBlock Foreground="#27AE60" FontSize="11" Margin="0,4,0,0"
+                       Text="{Binding ShrinkLimitText}"
+                       Visibility="{Binding HasShrinkLimit, Converter={StaticResource BoolToVis}}"/>
+
+            <TextBlock Foreground="#E74C3C" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"
+                       Text="Note: Extend requires contiguous unallocated space after the partition."/>
+        </StackPanel>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button Content="Cancel" Style="{StaticResource PrimaryButtonStyle}"
+                    Background="#34495E" Click="Cancel_Click" Margin="0,0,8,0"/>
+            <Button Content="Apply" Style="{StaticResource PrimaryButtonStyle}"
+                    IsEnabled="{Binding IsValid}" Click="Confirm_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

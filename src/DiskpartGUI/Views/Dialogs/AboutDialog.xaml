@@ -1,0 +1,69 @@
+<Window x:Class="DiskpartGUI.Views.Dialogs.AboutDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="About DiskpartGUI"
+        Width="420" SizeToContent="Height"
+        Background="#16213E"
+        Foreground="#ECF0F1"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+
+    <Window.Resources>
+        <ResourceDictionary Source="../../Resources/Styles.xaml"/>
+    </Window.Resources>
+
+    <StackPanel Margin="28,24,28,20">
+
+        <!-- App name + version -->
+        <TextBlock x:Name="AppNameText"
+                   FontSize="20" FontWeight="Bold" Foreground="#2F80ED"
+                   Margin="0,0,0,4"/>
+        <TextBlock x:Name="VersionText"
+                   FontSize="12" Foreground="#95A5A6"
+                   Margin="0,0,0,20"/>
+
+        <!-- Description -->
+        <TextBlock TextWrapping="Wrap" FontSize="13" Foreground="#ECF0F1"
+                   LineHeight="20" Margin="0,0,0,12">
+            A GUI frontend for the Windows diskpart tool. View disk and partition information, and perform add, delete, resize, and move operations — all without touching the command line.
+        </TextBlock>
+
+        <!-- Disclaimer -->
+        <Border Background="#1A1A2E" BorderBrush="#E67E22" BorderThickness="1"
+                CornerRadius="4" Padding="10,8" Margin="0,0,0,20">
+            <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#E67E22" LineHeight="18">
+                DiskpartGUI is created using Claude Code AI and may contain "slop". Use with caution, and as always — backup important data before making any changes!
+            </TextBlock>
+        </Border>
+
+        <!-- Links -->
+        <StackPanel Margin="0,0,0,20">
+            <TextBlock FontSize="12" Foreground="#95A5A6" Margin="0,0,0,4">Source code</TextBlock>
+            <TextBlock FontSize="13">
+                <Hyperlink x:Name="GitHubLink"
+                           Foreground="#2F80ED"
+                           RequestNavigate="GitHubLink_RequestNavigate">
+                    <!-- TODO: Replace with your GitHub repository URL -->
+                    https://github.com/therealscienta/DiskpartGUI
+                </Hyperlink>
+            </TextBlock>
+        </StackPanel>
+
+        <!-- Copyright + license -->
+        <Border BorderThickness="0,1,0,0" BorderBrush="#34495E" Padding="0,16,0,0" Margin="0,0,0,20">
+            <StackPanel>
+                <TextBlock x:Name="CopyrightText"
+                           FontSize="11" Foreground="#95A5A6" Margin="0,0,0,4"/>
+                <TextBlock FontSize="11" Foreground="#95A5A6">
+                    Released under the MIT License.
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Close -->
+        <Button Content="Close" Style="{StaticResource PrimaryButtonStyle}"
+                HorizontalAlignment="Right" Width="80"
+                Click="Close_Click"/>
+    </StackPanel>
+</Window>

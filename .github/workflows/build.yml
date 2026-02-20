@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: windows-latest  # WPF requires Windows SDK
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore DiskpartGUI.sln
+
+      - name: Build (Release)
+        run: dotnet build DiskpartGUI.sln --no-restore --configuration Release -p:Platform=x64
+
+      - name: Run unit tests
+        run: >
+          dotnet test tests/DiskpartGUI.Tests/DiskpartGUI.Tests.csproj
+          --no-build
+          --configuration Release
+          -p:Platform=x64
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory ./test-results
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: ./test-results/*.trx
+          retention-days: 14

@@ -1,0 +1,51 @@
+## Visual Studio / .NET
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Build outputs
+[Bb]in/
+[Oo]bj/
+publish/
+TestResults/
+test-results/
+
+## NuGet
+*.nupkg
+*.snupkg
+packages/
+!**/[Pp]ackages/build/
+.nuget/
+
+## Publish artifacts
+*.zip
+*.msix
+*.appxbundle
+*.appxupload
+
+## Signing certificates — NEVER commit
+*.pfx
+*.p12
+*.cer
+
+## OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+## Rider
+.idea/
+*.sln.iml
+
+## VSCode
+.vscode/
+
+## Claude Code AI session files
+.claude/
+
+## Temp
+*.tmp
+*.temp
+/tmp/

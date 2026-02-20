@@ -1,0 +1,133 @@
+<Window x:Class="DiskpartGUI.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:DiskpartGUI.Views"
+        xmlns:vm="clr-namespace:DiskpartGUI.ViewModels"
+        xmlns:converters="clr-namespace:DiskpartGUI.Converters"
+        Title="DiskpartGUI"
+        Width="1100" Height="700"
+        MinWidth="800" MinHeight="500"
+        Background="#16213E"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../Resources/Styles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <converters:BoolToVisibilityConverter x:Key="BoolToVis"/>
+            <converters:BoolToVisibilityConverter x:Key="InverseBoolToVis" Invert="True"/>
+            <DataTemplate DataType="{x:Type vm:DiskItemViewModel}">
+                <views:DiskDetailView/>
+            </DataTemplate>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="0" Background="#1A1A2E" Padding="12,8"
+                BorderThickness="0,0,0,1" BorderBrush="#34495E">
+            <DockPanel>
+                <!-- About button pinned to the right -->
+                <Button DockPanel.Dock="Right"
+                        Content="ℹ  About" Style="{StaticResource PrimaryButtonStyle}"
+                        Command="{Binding AboutCommand}" Margin="8,0,0,0"/>
+
+                <!-- Left-side operations -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="DiskpartGUI" FontSize="16" FontWeight="Bold"
+                               Foreground="#2F80ED" VerticalAlignment="Center" Margin="0,0,24,0"/>
+                    <Button Content="⟳  Refresh" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding RefreshCommand}" Margin="0,0,8,0"/>
+                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
+                               Margin="8,0" Visibility="Hidden"/>
+                    <Button Content="＋  Add Partition" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding AddPartitionCommand}" Margin="0,0,8,0"/>
+                    <Button Content="✕  Delete Partition" Style="{StaticResource DangerButtonStyle}"
+                            Command="{Binding DeletePartitionCommand}" Margin="0,0,8,0"/>
+                    <Button Content="⇔  Resize Partition" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding ResizePartitionCommand}" Margin="0,0,8,0"/>
+                    <Button Content="⇄  Move Partition" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding MovePartitionCommand}"/>
+
+                    <!-- Loading indicator -->
+                    <TextBlock Text="Loading..." Foreground="#95A5A6" VerticalAlignment="Center"
+                               Margin="16,0,0,0"
+                               Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Main content area -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="260" MinWidth="180" MaxWidth="400"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Disk list -->
+            <Border Grid.Column="0" Background="#1A1A2E" BorderThickness="0,0,1,0" BorderBrush="#34495E">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="DISKS" Foreground="#95A5A6"
+                               FontSize="11" FontWeight="SemiBold" Margin="12,10,12,6"/>
+
+                    <ListBox Grid.Row="1"
+                             ItemsSource="{Binding Disks}"
+                             SelectedItem="{Binding SelectedDisk, Mode=TwoWay}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ItemContainerStyle="{StaticResource DiskListItemStyle}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:DiskItemViewModel}">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Header}" FontSize="12"
+                                               Foreground="#ECF0F1" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{Binding MediaType}" FontSize="10"
+                                               Foreground="#95A5A6" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- Empty state -->
+                    <TextBlock Grid.Row="1" Text="No disks found." Foreground="#95A5A6"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12"
+                               Visibility="{Binding Disks.Count, Converter={StaticResource InverseBoolToVis}}"/>
+                </Grid>
+            </Border>
+
+            <!-- Splitter -->
+            <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch"
+                          Background="#34495E" ShowsPreview="True"/>
+
+            <!-- Disk detail / empty state -->
+            <Grid Grid.Column="2">
+                <ContentControl Content="{Binding SelectedDisk}"/>
+                <TextBlock Text="Select a disk to view its partitions."
+                           Foreground="#95A5A6" FontSize="14"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding SelectedDisk, Converter={StaticResource InverseBoolToVis}}"/>
+            </Grid>
+        </Grid>
+
+        <!-- Status bar -->
+        <StatusBar Grid.Row="2" Background="#1A1A2E" BorderThickness="0,1,0,0" BorderBrush="#34495E">
+            <StatusBarItem>
+                <TextBlock Text="{Binding StatusMessage}" Foreground="#95A5A6" FontSize="12" Padding="4,2"/>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>
