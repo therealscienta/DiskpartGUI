@@ -11,6 +11,7 @@ public sealed class DiskpartService : IPartitionService
     [
         "DiskPart has encountered an error",
         "There is not enough usable space",
+        "There is not enough usable free space",   // extend with no adjacent free space
         "The arguments specified are not valid",
         "Access is denied",
         "Virtual Disk Service error",
@@ -81,9 +82,12 @@ public sealed class DiskpartService : IPartitionService
     }
 
     public Task<DiskpartResult> ExtendPartitionAsync(
-        int diskNumber, int partitionNumber, long extendMb, CancellationToken ct = default)
+        int diskNumber, int partitionNumber, long? extendMb = null, CancellationToken ct = default)
     {
+        // Rescan and extend in a single diskpart session so VDS finishes re-enumerating
+        // before the extend command runs (avoids a race with a separate rescan process).
         var builder = _builderFactory()
+            .Rescan()
             .SelectDisk(diskNumber)
             .SelectPartition(partitionNumber)
             .ExtendSize(extendMb);
@@ -108,6 +112,8 @@ public sealed class DiskpartService : IPartitionService
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.GetEncoding(System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage),
+                    StandardErrorEncoding  = Encoding.GetEncoding(System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage),
                     CreateNoWindow = true,
                     // Do NOT set Verb = "runas" — elevation from app.manifest
                 }

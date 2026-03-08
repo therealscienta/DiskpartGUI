@@ -75,6 +75,20 @@ diskpart has no move command. The move feature opens `\\.\PhysicalDriveN` direct
 Copy direction matters: moving left → copy forward, moving right → copy backward (same as `memmove`).
 The partition table is updated **after** the full copy so cancellation leaves the source intact.
 
+### "Extend Partition" uses raw IOCTLs, not diskpart
+diskpart's `extend` command goes through VDS (Virtual Disk Service), which caches stale partition layouts after a raw move — causing silent no-ops. The extend path uses:
+1. `IOCTL_DISK_GROW_PARTITION` — grows the partition table entry directly through partmgr (synchronous, bypasses VDS)
+2. `FSCTL_EXTEND_VOLUME` — extends the NTFS filesystem to fill the new space
+
+### IOCTL_DISK_GROW_PARTITION triggers async PnP re-enumeration
+After `IOCTL_DISK_GROW_PARTITION` returns, partmgr asynchronously notifies the PnP manager, which may briefly take the volume offline for re-enumeration. Opening a volume handle (for `FSCTL_EXTEND_VOLUME`) immediately after `GrowPartition` can fail or get a stale handle. `RawDiskMoveService.ExtendNtfsWithRetry` retries with back-off (up to ~3 s) to let the volume settle before extending the filesystem.
+
+### diskpart output uses the system OEM code page, not UTF-8
+On non-English Windows, diskpart writes error messages in the system OEM encoding (e.g. CP850 for Swedish). `App.xaml.cs` calls `Encoding.RegisterProvider(CodePagesEncodingProvider.Instance)` at startup; `DiskpartService` sets `StandardOutputEncoding` / `StandardErrorEncoding` to `Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage)`.
+
+### VDS errors from diskpart are split across two lines
+diskpart emits `"Virtual Disk Service error:"` on one line and the detail message on the next line. `MainViewModel.ExtractDiskpartError` detects the trailing `:` pattern and joins the two lines before displaying the error.
+
 ### `shrink querymax` must be called before opening the Resize dialog
 diskpart always exits 0; it silently shrinks less than requested if unmovable files block it.
 `DiskpartService.QueryShrinkMaxAsync` runs `shrink querymax` first and parses the MB value.
@@ -145,13 +159,15 @@ src/DiskpartGUI/
 │   ├── WmiDiskService.cs           # WMI implementation
 │   ├── DiskpartService.cs          # diskpart execution + QueryShrinkMaxAsync
 │   ├── DiskpartScriptBuilder.cs    # Script builder (fluent, chainable)
-│   ├── RawDiskMoveService.cs       # Raw sector copy + partition table update
+│   ├── RawDiskMoveService.cs       # Raw sector copy, partition table update, NTFS extend
 │   └── WpfDialogService.cs         # Concrete WPF dialog service
 ├── ViewModels/
 │   ├── Infrastructure/             # ViewModelBase, RelayCommand, AsyncRelayCommand
+│   ├── IDiskBarItem.cs             # Interface shared by PartitionItemViewModel + FreeSpaceItemViewModel
 │   ├── MainViewModel.cs            # Root VM
-│   ├── DiskItemViewModel.cs        # Per-disk VM
+│   ├── DiskItemViewModel.cs        # Per-disk VM; BuildDisplayItems() merges partitions + free regions
 │   ├── PartitionItemViewModel.cs   # Per-partition VM (includes RelativeWidth for DiskBar)
+│   ├── FreeSpaceItemViewModel.cs   # Wraps FreeSpaceRegion for display in bar + DataGrid
 │   ├── AddPartitionViewModel.cs    # Dialog VM
 │   ├── DeletePartitionViewModel.cs # Dialog VM
 │   ├── ResizePartitionViewModel.cs # Dialog VM (MaxShrinkMb, MinNewSizeMb from querymax)

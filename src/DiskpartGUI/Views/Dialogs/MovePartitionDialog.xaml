@@ -44,18 +44,22 @@
                 <TextBlock Text="SELECT DESTINATION" Foreground="#95A5A6"
                            FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
 
-                <ListBox ItemsSource="{Binding AvailableRegions}"
-                         SelectedItem="{Binding SelectedRegion, Mode=TwoWay}"
+                <ListBox ItemsSource="{Binding AvailableDestinations}"
+                         SelectedItem="{Binding SelectedDestination, Mode=TwoWay}"
                          Background="#1A1A2E" BorderBrush="#34495E" BorderThickness="1"
                          Foreground="#ECF0F1" Height="120"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <StackPanel Orientation="Horizontal" Margin="4,4">
-                                <TextBlock Text="{Binding DisplaySize}" FontWeight="SemiBold"
-                                           Foreground="#ECF0F1" Margin="0,0,12,0"/>
-                                <TextBlock Text="free at offset" Foreground="#95A5A6" Margin="0,0,6,0"/>
-                                <TextBlock Text="{Binding DisplayOffset}" Foreground="#95A5A6"/>
+                                <TextBlock Text="{Binding DirectionLabel}" FontWeight="SemiBold"
+                                           Foreground="#2F80ED" Margin="0,0,10,0"/>
+                                <TextBlock Text="Place at:" Foreground="#95A5A6" Margin="0,0,6,0"/>
+                                <TextBlock Text="{Binding DisplayDestinationOffset}" FontWeight="SemiBold"
+                                           Foreground="#ECF0F1" Margin="0,0,8,0"/>
+                                <TextBlock Text="(" Foreground="#95A5A6"/>
+                                <TextBlock Text="{Binding DisplaySize}" Foreground="#95A5A6"/>
+                                <TextBlock Text=" free)" Foreground="#95A5A6"/>
                             </StackPanel>
                         </DataTemplate>
                     </ListBox.ItemTemplate>

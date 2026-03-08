@@ -31,6 +31,6 @@ public interface IPartitionService
     Task<DiskpartResult> ExtendPartitionAsync(
         int diskNumber,
         int partitionNumber,
-        long extendMb,
+        long? extendMb = null,
         CancellationToken ct = default);
 }

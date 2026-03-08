@@ -10,7 +10,7 @@
     </UserControl.Resources>
 
     <Border Background="#1A1A2E" CornerRadius="4" ClipToBounds="True">
-        <ItemsControl x:Name="PartitionsControl" ItemsSource="{Binding DisplayItems}">
+        <ItemsControl x:Name="PartitionsControl">
             <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
                     <DockPanel LastChildFill="True"/>

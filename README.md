@@ -11,11 +11,12 @@ A modern Windows desktop application providing a graphical interface for the Win
 ## Features
 
 - **View all physical disks** with model, size, interface type, and status
-- **Visual partition bar** — proportional color-coded representation of each disk's layout
+- **Visual partition bar** — proportional color-coded representation of each disk's layout, including unallocated regions
+- **Unallocated space** — free regions are shown as distinct items in both the disk bar and the partition list
 - **Partition details** — drive letter, label, filesystem, size, offset, and boot flags
 - **Add partition** — create a new primary partition with configurable size, label, and filesystem (NTFS / FAT32 / exFAT)
 - **Delete partition** — with protection for system/boot partitions and a force-override option
-- **Resize partition** — shrink or extend with a real-time shrink limit from `shrink querymax` (prevents silent partial shrinks caused by unmovable files like `pagefile.sys` or VSS snapshots)
+- **Resize partition** — shrink or extend with a real-time shrink limit from `shrink querymax` (prevents silent partial shrinks caused by unmovable files like `pagefile.sys` or VSS snapshots); extend uses raw Win32 IOCTLs to bypass the VDS cache
 - **Move partition** — physically relocates a partition's data using raw sector I/O; safe cancellation leaves the source partition intact if aborted mid-copy
 - **About dialog** — version, description, and GitHub link
 - **Portable** — runs as a single `.exe` with no installation required
@@ -73,9 +74,10 @@ dotnet publish src/DiskpartGUI/DiskpartGUI.csproj `
   --runtime win-x64 `
   --self-contained true `
   -p:PublishSingleFile=true `
-  -p:IncludeNativeLibrariesForSelfExtract=true `
   --output ./publish/portable
 ```
+
+> The output directory will contain `DiskpartGUI.exe` plus a small set of WPF native DLLs (`wpfgfx_cor3.dll`, `D3DCompiler_47_cor3.dll`, etc.) that must be kept alongside the exe.
 
 ---
 
@@ -102,8 +104,8 @@ src/DiskpartGUI/
 
 **Technology choices:**
 - **WMI** (`Win32_DiskDrive`, `Win32_DiskPartition`, `Win32_LogicalDisk`) for structured disk reads
-- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, and resize operations
-- **Raw Win32 I/O** (`CreateFile`, `ReadFile`, `WriteFile`, `DeviceIoControl`) for the move operation — diskpart has no move command
+- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, and shrink operations
+- **Raw Win32 I/O** (`CreateFile`, `ReadFile`, `WriteFile`, `DeviceIoControl`) for move and extend — diskpart has no move command and its extend path goes through VDS, which caches stale layouts after raw partition moves
 - **WPF + classic MVVM** with manual `ViewModelBase` and `RelayCommand` (no framework dependencies beyond `System.Management`)
 
 **Move partition safety model:**

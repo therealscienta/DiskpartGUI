@@ -48,6 +48,63 @@ public sealed class RawDiskMoveService : IPartitionMoveService
             list.Add(new FreeSpaceRegion(start, size));
     }
 
+    // ── Extend operation ──────────────────────────────────────────────────────
+
+    public Task ExtendPartitionRawAsync(
+        int diskNumber, long partitionStartOffset, long growByBytes,
+        string? driveLetter, CancellationToken ct = default)
+        => Task.Run(() => ExecuteExtend(diskNumber, partitionStartOffset, growByBytes, driveLetter), ct);
+
+    private static void ExecuteExtend(
+        int diskNumber, long partitionStartOffset, long growByBytes, string? driveLetter)
+    {
+        // Grow the partition table entry directly via partmgr (synchronous, bypasses VDS).
+        using var diskHandle = NativeDisk.OpenDisk(diskNumber, readWrite: true);
+        var layout = NativeDisk.GetDriveLayout(diskHandle);
+        int count = NativeDisk.GetPartitionCount(layout);
+
+        uint partitionNumber = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (NativeDisk.ReadEntryStartingOffset(layout, i) == partitionStartOffset)
+            {
+                partitionNumber = NativeDisk.ReadEntryPartitionNumber(layout, i);
+                break;
+            }
+        }
+
+        if (partitionNumber == 0)
+            throw new InvalidOperationException(
+                $"Partition at offset {partitionStartOffset} not found in disk layout.");
+
+        NativeDisk.GrowPartition(diskHandle, partitionNumber, growByBytes);
+
+        // Extend the NTFS filesystem to fill the newly grown partition.
+        // GrowPartition triggers an async PnP re-enumeration, so the volume may be briefly
+        // inaccessible immediately after. Retry with back-off to let it settle.
+        if (driveLetter is not null)
+            ExtendNtfsWithRetry(driveLetter, growByBytes);
+    }
+
+    private static void ExtendNtfsWithRetry(string driveLetter, long growByBytes)
+    {
+        // Up to 5 attempts (total wait ≤ ~3 s) to allow PnP re-enumeration to finish.
+        int[] delaysMs = [300, 600, 800, 800, 800];
+        Exception? last = null;
+        for (int i = 0; i < delaysMs.Length; i++)
+        {
+            System.Threading.Thread.Sleep(delaysMs[i]);
+            try
+            {
+                using var volumeHandle = NativeDisk.OpenVolume(driveLetter);
+                NativeDisk.ExtendVolume(volumeHandle, growByBytes);
+                return;
+            }
+            catch (System.ComponentModel.Win32Exception ex) { last = ex; }
+        }
+        throw last!;
+    }
+
     // ── Move operation ────────────────────────────────────────────────────────
 
     public async Task MovePartitionAsync(
@@ -202,5 +259,11 @@ public sealed class RawDiskMoveService : IPartitionMoveService
                 $"Could not find partition with offset {oldOffset} in the drive layout.");
 
         NativeDisk.SetDriveLayout(disk, layout);
+
+        // Notify partmgr/VDS about the changed layout so that a subsequent
+        // diskpart "extend" sees the new free space immediately.
+        try { NativeDisk.IoctlSimple(disk, NativeDisk.IOCTL_DISK_UPDATE_PROPERTIES,
+                  "IOCTL_DISK_UPDATE_PROPERTIES"); }
+        catch { /* best-effort — rescan will handle it if this fails */ }
     }
 }
