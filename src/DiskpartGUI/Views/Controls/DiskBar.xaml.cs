@@ -29,12 +29,12 @@ public partial class DiskBar : UserControl
     private void UpdateRelativeWidths()
     {
         if (TotalSizeBytes <= 0 || ActualWidth <= 0) return;
-        if (PartitionsControl.ItemsSource is not IEnumerable<PartitionItemViewModel> partitions) return;
+        if (PartitionsControl.ItemsSource is not IEnumerable<IDiskBarItem> items) return;
 
         var totalWidth = ActualWidth - 4; // account for margins
-        foreach (var partition in partitions)
+        foreach (var item in items)
         {
-            partition.RelativeWidth = (double)partition.SizeBytes / TotalSizeBytes * totalWidth;
+            item.RelativeWidth = (double)item.SizeBytes / TotalSizeBytes * totalWidth;
         }
     }
 }

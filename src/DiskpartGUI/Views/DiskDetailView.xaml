@@ -37,9 +37,19 @@
 
         <!-- Partition DataGrid -->
         <DataGrid Grid.Row="2"
-                  ItemsSource="{Binding Partitions}"
-                  SelectedItem="{Binding SelectedPartition, Mode=TwoWay}"
+                  ItemsSource="{Binding DisplayItems}"
+                  SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
                   Margin="0">
+            <DataGrid.RowStyle>
+                <Style TargetType="DataGridRow">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding Type}" Value="Unallocated">
+                            <Setter Property="Foreground" Value="#7F8C8D"/>
+                            <Setter Property="FontStyle" Value="Italic"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </DataGrid.RowStyle>
             <DataGrid.Columns>
                 <DataGridTemplateColumn Header=" " Width="6">
                     <DataGridTemplateColumn.CellTemplate>

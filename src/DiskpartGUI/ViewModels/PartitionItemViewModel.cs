@@ -3,7 +3,7 @@ using DiskpartGUI.ViewModels.Infrastructure;
 
 namespace DiskpartGUI.ViewModels;
 
-public sealed class PartitionItemViewModel : ViewModelBase
+public sealed class PartitionItemViewModel : ViewModelBase, IDiskBarItem
 {
     public PartitionInfo Partition { get; }
     public LogicalDiskInfo? LogicalDisk { get; }

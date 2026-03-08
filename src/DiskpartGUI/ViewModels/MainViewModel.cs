@@ -88,7 +88,8 @@ public sealed class MainViewModel : ViewModelBase
                 var diskVm = new DiskItemViewModel(disk);
                 diskVm.PropertyChanged += (_, e) =>
                 {
-                    if (e.PropertyName == nameof(DiskItemViewModel.SelectedPartition))
+                    if (e.PropertyName == nameof(DiskItemViewModel.SelectedPartition) ||
+                        e.PropertyName == nameof(DiskItemViewModel.SelectedItem))
                     {
                         OnPropertyChanged(nameof(SelectedPartition));
                         ((AsyncRelayCommand)DeletePartitionCommand).RaiseCanExecuteChanged();
@@ -103,6 +104,7 @@ public sealed class MainViewModel : ViewModelBase
                     var logicalDisk = await _diskService.GetLogicalDiskAsync(disk.DiskNumber, partition.PartitionIndex, ct);
                     diskVm.Partitions.Add(new PartitionItemViewModel(partition, logicalDisk));
                 }
+                diskVm.BuildDisplayItems();
                 diskVms.Add(diskVm);
             }
 

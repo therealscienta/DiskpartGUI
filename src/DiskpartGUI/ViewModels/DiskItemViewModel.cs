@@ -6,7 +6,7 @@ namespace DiskpartGUI.ViewModels;
 
 public sealed class DiskItemViewModel : ViewModelBase
 {
-    private PartitionItemViewModel? _selectedPartition;
+    private object? _selectedItem;
 
     public DiskInfo Disk { get; }
 
@@ -21,16 +21,53 @@ public sealed class DiskItemViewModel : ViewModelBase
     public string Header => $"Disk {DiskNumber}  —  {Model}  ({DisplaySize})";
 
     public ObservableCollection<PartitionItemViewModel> Partitions { get; } = [];
+    public ObservableCollection<IDiskBarItem> DisplayItems { get; } = [];
 
-    public PartitionItemViewModel? SelectedPartition
+    public object? SelectedItem
     {
-        get => _selectedPartition;
-        set => SetProperty(ref _selectedPartition, value);
+        get => _selectedItem;
+        set
+        {
+            if (SetProperty(ref _selectedItem, value))
+                OnPropertyChanged(nameof(SelectedPartition));
+        }
     }
+
+    public PartitionItemViewModel? SelectedPartition => _selectedItem as PartitionItemViewModel;
 
     public DiskItemViewModel(DiskInfo disk)
     {
         Disk = disk;
+    }
+
+    public void BuildDisplayItems()
+    {
+        const long MinFreeSpaceBytes = 1L * 1024 * 1024; // 1 MB
+
+        var sorted = Partitions
+            .Where(p => p.SizeBytes > 0)
+            .OrderBy(p => p.StartingOffset)
+            .ToList();
+
+        var items = new List<IDiskBarItem>();
+        long cursor = 0L;
+
+        foreach (var p in sorted)
+        {
+            long gap = p.StartingOffset - cursor;
+            if (gap >= MinFreeSpaceBytes)
+                items.Add(new FreeSpaceItemViewModel(new FreeSpaceRegion(cursor, gap)));
+            items.Add(p);
+            cursor = p.StartingOffset + p.SizeBytes;
+        }
+
+        long trailingGap = Disk.SizeBytes - cursor;
+        if (trailingGap >= MinFreeSpaceBytes)
+            items.Add(new FreeSpaceItemViewModel(new FreeSpaceRegion(cursor, trailingGap)));
+
+        DisplayItems.Clear();
+        foreach (var item in items)
+            DisplayItems.Add(item);
     }
 
     private static string BytesToHuman(long bytes)

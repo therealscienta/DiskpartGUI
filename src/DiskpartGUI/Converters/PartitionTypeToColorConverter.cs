@@ -11,6 +11,7 @@ public sealed class PartitionTypeToColorConverter : IValueConverter
     private static readonly Brush Fat32Brush = new SolidColorBrush(Color.FromRgb(0x27, 0xAE, 0x60));
     private static readonly Brush ExFatBrush = new SolidColorBrush(Color.FromRgb(0x8E, 0x44, 0xAD));
     private static readonly Brush SystemBrush = new SolidColorBrush(Color.FromRgb(0xE7, 0x4C, 0x3C));
+    private static readonly Brush UnallocatedBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x4E));
     private static readonly Brush UnknownBrush = new SolidColorBrush(Color.FromRgb(0x95, 0xA5, 0xA6));
 
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
@@ -33,6 +34,9 @@ public sealed class PartitionTypeToColorConverter : IValueConverter
             type.Contains("Recovery", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("EFI", StringComparison.OrdinalIgnoreCase))
             return SystemBrush;
+
+        if (type.Equals("Unallocated", StringComparison.OrdinalIgnoreCase))
+            return UnallocatedBrush;
 
         return UnknownBrush;
     }
