@@ -81,7 +81,7 @@ operation. The original partition remains intact if you cancel before completion
                 <TextBlock Text="{Binding PartitionDescription}" Foreground="#ECF0F1"
                            FontSize="13" Margin="0,0,0,20" TextWrapping="Wrap"/>
 
-                <ProgressBar Value="{Binding ProgressPercent}" Minimum="0" Maximum="100"
+                <ProgressBar Value="{Binding ProgressPercent, Mode=OneWay}" Minimum="0" Maximum="100"
                              Height="20" Margin="0,0,0,8"
                              Background="#1A1A2E" Foreground="#2F80ED"/>
 
