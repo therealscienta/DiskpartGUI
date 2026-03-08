@@ -29,7 +29,10 @@ public sealed class MovePartitionViewModel : ViewModelBase
         set
         {
             if (SetProperty(ref _selectedRegion, value))
+            {
                 OnPropertyChanged(nameof(CanMove));
+                MoveCommand.RaiseCanExecuteChanged();
+            }
         }
     }
 
@@ -94,7 +97,7 @@ public sealed class MovePartitionViewModel : ViewModelBase
     public bool ShowProgress  => IsMoving || IsComplete || IsCancelled;
     public bool ShowConfigure => !ShowProgress;
     public bool CanCancel  => IsMoving && !IsComplete;
-    public bool ShowClose  => !IsMoving;
+    public bool ShowClose  => IsComplete || IsCancelled;
 
     public string StatusMessage => IsComplete   ? "Move completed successfully."
                                  : IsCancelled  ? "Move cancelled. The original partition is unchanged."
