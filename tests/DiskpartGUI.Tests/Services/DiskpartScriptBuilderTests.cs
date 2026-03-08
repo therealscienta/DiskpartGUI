@@ -111,6 +111,14 @@ public sealed class DiskpartScriptBuilderTests
     }
 
     [Fact]
+    public void ExtendSize_NoSize_EmitsExtendWithoutSize()
+    {
+        var script = Builder().ExtendSize().Build();
+        Assert.Contains("extend", script);
+        Assert.DoesNotContain("extend size=", script);
+    }
+
+    [Fact]
     public void Build_CompleteAddPartitionScript_ProducesExpectedOutput()
     {
         var script = Builder()

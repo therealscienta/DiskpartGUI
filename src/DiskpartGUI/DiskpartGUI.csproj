@@ -14,6 +14,7 @@
     <FileVersion>1.0.0.0</FileVersion>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Resources\favicon_filled.ico"/>

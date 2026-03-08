@@ -4,12 +4,30 @@ using DiskpartGUI.ViewModels.Infrastructure;
 
 namespace DiskpartGUI.ViewModels;
 
+public sealed record MoveDestinationItem(
+    FreeSpaceRegion Region,
+    string DirectionLabel,
+    long DestinationOffsetBytes)
+{
+    /// <summary>Actual offset where the partition will be placed.</summary>
+    public string DisplayDestinationOffset => BytesToHuman(DestinationOffsetBytes);
+    public string DisplaySize => Region.DisplaySize;
+
+    private static string BytesToHuman(long bytes)
+    {
+        if (bytes >= 1_099_511_627_776L) return $"{bytes / 1_099_511_627_776.0:F1} TB";
+        if (bytes >= 1_073_741_824L) return $"{bytes / 1_073_741_824.0:F1} GB";
+        if (bytes >= 1_048_576L) return $"{bytes / 1_048_576.0:F0} MB";
+        return $"{bytes / 1024.0:F0} KB";
+    }
+}
+
 public sealed class MovePartitionViewModel : ViewModelBase
 {
     private readonly Func<long, IProgress<MoveProgress>, CancellationToken, Task> _moveOperation;
     private CancellationTokenSource? _cts;
 
-    private FreeSpaceRegion? _selectedRegion;
+    private MoveDestinationItem? _selectedDestination;
     private bool _isMoving;
     private bool _isComplete;
     private bool _isCancelled;
@@ -19,17 +37,20 @@ public sealed class MovePartitionViewModel : ViewModelBase
     // ── Read-only info ────────────────────────────────────────────────────────
 
     public string PartitionDescription { get; }
-    public ObservableCollection<FreeSpaceRegion> AvailableRegions { get; }
+    public ObservableCollection<MoveDestinationItem> AvailableDestinations { get; }
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    public FreeSpaceRegion? SelectedRegion
+    public MoveDestinationItem? SelectedDestination
     {
-        get => _selectedRegion;
+        get => _selectedDestination;
         set
         {
-            if (SetProperty(ref _selectedRegion, value))
+            if (SetProperty(ref _selectedDestination, value))
+            {
                 OnPropertyChanged(nameof(CanMove));
+                MoveCommand.RaiseCanExecuteChanged();
+            }
         }
     }
 
@@ -90,11 +111,11 @@ public sealed class MovePartitionViewModel : ViewModelBase
 
     // ── Derived UI state ──────────────────────────────────────────────────────
 
-    public bool CanMove    => SelectedRegion is not null && !IsMoving && !IsComplete && !IsCancelled;
+    public bool CanMove    => SelectedDestination is not null && !IsMoving && !IsComplete && !IsCancelled;
     public bool ShowProgress  => IsMoving || IsComplete || IsCancelled;
     public bool ShowConfigure => !ShowProgress;
     public bool CanCancel  => IsMoving && !IsComplete;
-    public bool ShowClose  => !IsMoving;
+    public bool ShowClose  => IsComplete || IsCancelled;
 
     public string StatusMessage => IsComplete   ? "Move completed successfully."
                                  : IsCancelled  ? "Move cancelled. The original partition is unchanged."
@@ -116,11 +137,26 @@ public sealed class MovePartitionViewModel : ViewModelBase
     public MovePartitionViewModel(
         string partitionDescription,
         IReadOnlyList<FreeSpaceRegion> availableRegions,
-        Func<long, IProgress<MoveProgress>, CancellationToken, Task> moveOperation)
+        Func<long, IProgress<MoveProgress>, CancellationToken, Task> moveOperation,
+        long sourceOffsetBytes = 0L,
+        long partitionSizeBytes = 0L)
     {
         PartitionDescription = partitionDescription;
-        AvailableRegions     = new ObservableCollection<FreeSpaceRegion>(availableRegions);
         _moveOperation       = moveOperation;
+
+        AvailableDestinations = new ObservableCollection<MoveDestinationItem>(
+            availableRegions.Select(r =>
+            {
+                bool movingRight = r.StartOffsetBytes >= sourceOffsetBytes;
+                // For right moves: slide partition to the far end of the free space
+                // so the freed gap is contiguous with whatever is to the left.
+                // For left moves: slide to the far start of the free space.
+                long destOffset = movingRight
+                    ? r.StartOffsetBytes + r.SizeBytes - partitionSizeBytes
+                    : r.StartOffsetBytes;
+                string dirLabel = movingRight ? "→ right" : "← left";
+                return new MoveDestinationItem(r, dirLabel, destOffset);
+            }));
 
         MoveCommand   = new AsyncRelayCommand(ExecuteMoveAsync, () => CanMove);
         CancelCommand = new RelayCommand(ExecuteCancel, () => CanCancel);
@@ -131,7 +167,7 @@ public sealed class MovePartitionViewModel : ViewModelBase
 
     private async Task ExecuteMoveAsync(CancellationToken _)
     {
-        if (SelectedRegion is null) return;
+        if (SelectedDestination is null) return;
 
         _cts = new CancellationTokenSource();
         IsMoving = true;
@@ -146,7 +182,7 @@ public sealed class MovePartitionViewModel : ViewModelBase
                 ProgressStatus  = p.StatusText;
             });
 
-            await _moveOperation(SelectedRegion.StartOffsetBytes, progress, _cts.Token);
+            await _moveOperation(SelectedDestination.DestinationOffsetBytes, progress, _cts.Token);
             IsComplete = true;
         }
         catch (OperationCanceledException)

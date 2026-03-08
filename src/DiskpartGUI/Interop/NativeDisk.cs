@@ -12,11 +12,22 @@ namespace DiskpartGUI.Interop;
 internal static class NativeDisk
 {
     // ── IOCTL codes ──────────────────────────────────────────────────────────
-    internal const uint FSCTL_LOCK_VOLUME             = 0x00090018;
-    internal const uint FSCTL_UNLOCK_VOLUME           = 0x0009001C;
-    internal const uint FSCTL_DISMOUNT_VOLUME         = 0x00090020;
+    internal const uint FSCTL_LOCK_VOLUME              = 0x00090018;
+    internal const uint FSCTL_UNLOCK_VOLUME            = 0x0009001C;
+    internal const uint FSCTL_DISMOUNT_VOLUME          = 0x00090020;
     internal const uint IOCTL_DISK_GET_DRIVE_LAYOUT_EX = 0x00070050;
-    internal const uint IOCTL_DISK_SET_DRIVE_LAYOUT_EX = 0x0007C050;
+    internal const uint IOCTL_DISK_SET_DRIVE_LAYOUT_EX = 0x0007C054;
+    // Tells partmgr/VDS to re-read the disk layout and notify all subscribers
+    internal const uint IOCTL_DISK_UPDATE_PROPERTIES   = 0x00070140;
+    // Grows a partition entry directly in partmgr — synchronous, bypasses VDS cache
+    // CTL_CODE(IOCTL_DISK_BASE=7, 0x34, METHOD_BUFFERED=0, FILE_READ|WRITE_ACCESS=3)
+    internal const uint IOCTL_DISK_GROW_PARTITION      = 0x0007C0D0;
+    // Queries NTFS volume metadata (NumberSectors, BytesPerCluster, etc.)
+    // CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, 25, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
+    internal const uint FSCTL_GET_NTFS_VOLUME_DATA     = 0x00090064;
+    // Extends the NTFS filesystem to a new total sector count
+    // CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, 60, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
+    internal const uint FSCTL_EXTEND_VOLUME            = 0x000900F0;
 
     // ── Access / share / creation flags ──────────────────────────────────────
     private const uint GENERIC_READ       = 0x80000000;
@@ -203,5 +214,57 @@ internal static class NativeDisk
     {
         int pos = DriveLayoutHeaderSize + entryIndex * PartitionEntrySize + EntryRewriteOffset;
         layout[pos] = 1;
+    }
+
+    internal static uint ReadEntryPartitionNumber(byte[] layout, int entryIndex)
+    {
+        int pos = DriveLayoutHeaderSize + entryIndex * PartitionEntrySize + 24; // PartitionNumber offset
+        return BinaryPrimitives.ReadUInt32LittleEndian(layout.AsSpan(pos));
+    }
+
+    /// <summary>
+    /// Grows the on-disk partition entry by <paramref name="bytesToGrow"/> bytes.
+    /// Calls IOCTL_DISK_GROW_PARTITION which updates partmgr synchronously — no VDS involvement.
+    /// </summary>
+    internal static void GrowPartition(SafeFileHandle diskHandle, uint partitionNumber, long bytesToGrow)
+    {
+        // DISK_GROW_PARTITION struct layout:
+        //   [0..3]  PartitionNumber (ULONG)
+        //   [4..7]  padding (LARGE_INTEGER is 8-byte aligned)
+        //   [8..15] BytesToGrow (LARGE_INTEGER)
+        var buf = new byte[16];
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(0), partitionNumber);
+        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(8), bytesToGrow);
+
+        if (!DeviceIoControl(diskHandle, IOCTL_DISK_GROW_PARTITION,
+                buf, (uint)buf.Length, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "IOCTL_DISK_GROW_PARTITION failed.");
+    }
+
+    /// <summary>
+    /// Extends the NTFS filesystem on the volume to incorporate <paramref name="growByBytes"/>
+    /// additional bytes, using the current sector count from FSCTL_GET_NTFS_VOLUME_DATA.
+    /// </summary>
+    internal static void ExtendVolume(SafeFileHandle volumeHandle, long growByBytes)
+    {
+        // NTFS_VOLUME_DATA_BUFFER: [8..15] = NumberSectors (LARGE_INTEGER, 512-byte sectors)
+        var ntfsData = new byte[120];
+        if (!DeviceIoControl(volumeHandle, FSCTL_GET_NTFS_VOLUME_DATA,
+                IntPtr.Zero, 0, ntfsData, (uint)ntfsData.Length, out _, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "FSCTL_GET_NTFS_VOLUME_DATA failed.");
+
+        // NTFS_VOLUME_DATA_BUFFER layout:
+        //   [8]  NumberSectors  : LONGLONG  — sector count using the volume's own sector size
+        //   [40] BytesPerSector : DWORD     — NTFS logical sector size (512 on most disks, 4096 on 4Kn)
+        long currentSectors = BinaryPrimitives.ReadInt64LittleEndian(ntfsData.AsSpan(8));
+        long bytesPerSector  = BinaryPrimitives.ReadUInt32LittleEndian(ntfsData.AsSpan(40));
+        long newSectors = currentSectors + growByBytes / bytesPerSector;
+
+        var buf = new byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(0), newSectors);
+
+        if (!DeviceIoControl(volumeHandle, FSCTL_EXTEND_VOLUME,
+                buf, (uint)buf.Length, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "FSCTL_EXTEND_VOLUME failed.");
     }
 }

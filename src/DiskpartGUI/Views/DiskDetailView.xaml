@@ -32,14 +32,24 @@
 
         <!-- Disk bar visualization -->
         <Border Grid.Row="1" Padding="16,12" BorderThickness="0,0,0,1" BorderBrush="#34495E">
-            <controls:DiskBar TotalSizeBytes="{Binding SizeBytes}" DataContext="{Binding}"/>
+            <controls:DiskBar TotalSizeBytes="{Binding SizeBytes}" Items="{Binding DisplayItems}"/>
         </Border>
 
         <!-- Partition DataGrid -->
         <DataGrid Grid.Row="2"
-                  ItemsSource="{Binding Partitions}"
-                  SelectedItem="{Binding SelectedPartition, Mode=TwoWay}"
+                  ItemsSource="{Binding DisplayItems}"
+                  SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
                   Margin="0">
+            <DataGrid.RowStyle>
+                <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding Type}" Value="Unallocated">
+                            <Setter Property="Foreground" Value="#7F8C8D"/>
+                            <Setter Property="FontStyle" Value="Italic"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </DataGrid.RowStyle>
             <DataGrid.Columns>
                 <DataGridTemplateColumn Header=" " Width="6">
                     <DataGridTemplateColumn.CellTemplate>

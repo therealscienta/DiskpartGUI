@@ -88,7 +88,8 @@ public sealed class MainViewModel : ViewModelBase
                 var diskVm = new DiskItemViewModel(disk);
                 diskVm.PropertyChanged += (_, e) =>
                 {
-                    if (e.PropertyName == nameof(DiskItemViewModel.SelectedPartition))
+                    if (e.PropertyName == nameof(DiskItemViewModel.SelectedPartition) ||
+                        e.PropertyName == nameof(DiskItemViewModel.SelectedItem))
                     {
                         OnPropertyChanged(nameof(SelectedPartition));
                         ((AsyncRelayCommand)DeletePartitionCommand).RaiseCanExecuteChanged();
@@ -103,6 +104,7 @@ public sealed class MainViewModel : ViewModelBase
                     var logicalDisk = await _diskService.GetLogicalDiskAsync(disk.DiskNumber, partition.PartitionIndex, ct);
                     diskVm.Partitions.Add(new PartitionItemViewModel(partition, logicalDisk));
                 }
+                diskVm.BuildDisplayItems();
                 diskVms.Add(diskVm);
             }
 
@@ -202,8 +204,17 @@ public sealed class MainViewModel : ViewModelBase
         if (SelectedDisk is null || SelectedPartition is null) return;
 
         var currentSizeMb = SelectedPartition.SizeBytes / (1024 * 1024);
-        var usedBytes = SelectedDisk.Partitions.Sum(p => p.SizeBytes);
-        var availableMb = (SelectedDisk.SizeBytes - usedBytes) / (1024 * 1024);
+
+        // Compute contiguous free space immediately after this partition, not total disk free.
+        // Total disk free overshoots due to GPT overhead and non-adjacent free regions.
+        var partEnd = SelectedPartition.StartingOffset + SelectedPartition.SizeBytes;
+        var nextStart = SelectedDisk.Partitions
+            .Where(p => p.StartingOffset >= partEnd)
+            .OrderBy(p => p.StartingOffset)
+            .Select(p => (long?)p.StartingOffset)
+            .FirstOrDefault();
+        var adjacentFreeBytes = (nextStart ?? SelectedDisk.SizeBytes) - partEnd;
+        var availableMb = adjacentFreeBytes / (1024 * 1024);
 
         StatusMessage = "Checking resize limits…";
         long maxShrinkMb;
@@ -231,8 +242,26 @@ public sealed class MainViewModel : ViewModelBase
         else
         {
             StatusMessage = "Extending partition...";
-            diskResult = await _partitionService.ExtendPartitionAsync(
-                SelectedDisk.DiskNumber, SelectedPartition.PartitionIndex, vm.DeltaMb, ct);
+            // Use raw IOCTL_DISK_GROW_PARTITION + FSCTL_EXTEND_VOLUME instead of diskpart.
+            // diskpart's extend relies on VDS which caches stale layouts after raw moves;
+            // the raw IOCTLs go directly to partmgr and NTFS, bypassing VDS entirely.
+            long growByBytes = vm.NewSizeMb >= vm.MaxSizeMb
+                ? adjacentFreeBytes          // exact bytes for max extend
+                : vm.DeltaMb * 1024L * 1024L;
+            try
+            {
+                await _moveService.ExtendPartitionRawAsync(
+                    SelectedDisk.DiskNumber,
+                    SelectedPartition.StartingOffset,
+                    growByBytes,
+                    SelectedPartition.DriveLetter,
+                    ct);
+                diskResult = new DiskpartResult(true, string.Empty, null);
+            }
+            catch (Exception ex)
+            {
+                diskResult = new DiskpartResult(false, ex.Message, null);
+            }
         }
 
         if (diskResult.Success)
@@ -264,7 +293,7 @@ public sealed class MainViewModel : ViewModelBase
             return;
         }
 
-        var desc = $"Disk {SelectedDisk.DiskNumber}, Partition {SelectedPartition.PartitionIndex} ({SelectedPartition.DisplaySize})";
+        var desc = $"Disk {SelectedDisk.DiskNumber}, Partition {SelectedPartition.PartitionIndex} ({SelectedPartition.DisplaySize}) — currently at offset {SelectedPartition.DisplayOffset}";
         var srcOffset = SelectedPartition.StartingOffset;
         var sizeBytes = SelectedPartition.SizeBytes;
         var driveLetter = SelectedPartition.DriveLetter;
@@ -274,7 +303,9 @@ public sealed class MainViewModel : ViewModelBase
             desc,
             regions,
             (destOffset, progress, token) => _moveService.MovePartitionAsync(
-                diskNumber, driveLetter, srcOffset, destOffset, sizeBytes, progress, token));
+                diskNumber, driveLetter, srcOffset, destOffset, sizeBytes, progress, token),
+            srcOffset,
+            sizeBytes);
 
         var result = _dialogService.ShowMovePartitionDialog(vm);
         if (result == true)
@@ -293,7 +324,12 @@ public sealed class MainViewModel : ViewModelBase
     private static string ExtractDiskpartError(string output)
     {
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        var errorLine = lines.FirstOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase));
-        return errorLine?.Trim() ?? output.Trim();
+        var idx = lines.ToList().FindIndex(l => l.Contains("error", StringComparison.OrdinalIgnoreCase));
+        if (idx < 0) return output.Trim();
+        // VDS errors are two lines: "Virtual Disk Service error:" + detail on the next line
+        var errorLine = lines[idx].Trim();
+        if (idx + 1 < lines.Length && errorLine.EndsWith(':'))
+            errorLine = errorLine + " " + lines[idx + 1].Trim();
+        return errorLine;
     }
 }

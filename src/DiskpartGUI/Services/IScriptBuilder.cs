@@ -10,6 +10,7 @@ public interface IScriptBuilder
     IScriptBuilder DeletePartition(bool overrideProtected = false);
     IScriptBuilder ShrinkDesired(long mb);
     IScriptBuilder ShrinkQueryMax();
-    IScriptBuilder ExtendSize(long mb);
+    IScriptBuilder ExtendSize(long? sizeMb = null);
+    IScriptBuilder Rescan();
     string Build();
 }

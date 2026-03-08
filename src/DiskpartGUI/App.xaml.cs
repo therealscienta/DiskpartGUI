@@ -10,6 +10,8 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // Register OEM/ANSI code pages so diskpart output decodes correctly on all locales
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
         DispatcherUnhandledException += (_, ex) =>
         {

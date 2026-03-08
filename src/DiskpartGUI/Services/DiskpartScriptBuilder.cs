@@ -60,9 +60,15 @@ public sealed class DiskpartScriptBuilder : IScriptBuilder
         return this;
     }
 
-    public IScriptBuilder ExtendSize(long mb)
+    public IScriptBuilder ExtendSize(long? sizeMb = null)
     {
-        _sb.AppendLine($"extend size={mb}");
+        _sb.AppendLine(sizeMb.HasValue ? $"extend size={sizeMb.Value}" : "extend");
+        return this;
+    }
+
+    public IScriptBuilder Rescan()
+    {
+        _sb.AppendLine("rescan");
         return this;
     }
 
