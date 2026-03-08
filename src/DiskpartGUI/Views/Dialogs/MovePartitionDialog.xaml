@@ -11,7 +11,12 @@
         ShowInTaskbar="False">
 
     <Window.Resources>
-        <ResourceDictionary Source="../../Resources/Styles.xaml"/>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../../Resources/Styles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <converters:BoolToVisibilityConverter x:Key="BoolToVis"/>
+        </ResourceDictionary>
     </Window.Resources>
 
     <Grid Margin="24">
