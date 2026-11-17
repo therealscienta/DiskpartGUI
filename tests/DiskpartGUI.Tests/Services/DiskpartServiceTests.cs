@@ -6,12 +6,6 @@ namespace DiskpartGUI.Tests.Services;
 
 public sealed class DiskpartServiceTests
 {
-    private static DiskpartService CreateService(IScriptBuilder? builder = null)
-    {
-        var mock = builder ?? new DiskpartScriptBuilder();
-        return new DiskpartService(() => mock);
-    }
-
     [Fact]
     public void Constructor_NullFactory_Throws()
     {
@@ -23,7 +17,7 @@ public sealed class DiskpartServiceTests
     {
         var mockBuilder = new Mock<IScriptBuilder>();
         mockBuilder.Setup(b => b.SelectDisk(It.IsAny<int>())).Returns(mockBuilder.Object);
-        mockBuilder.Setup(b => b.CreatePartitionPrimary(It.IsAny<long?>())).Returns(mockBuilder.Object);
+        mockBuilder.Setup(b => b.CreatePartitionPrimary(It.IsAny<long?>(), It.IsAny<long?>())).Returns(mockBuilder.Object);
         mockBuilder.Setup(b => b.FormatPartition(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(mockBuilder.Object);
         mockBuilder.Setup(b => b.AssignLetter()).Returns(mockBuilder.Object);
         mockBuilder.Setup(b => b.Build()).Returns("select disk 0\ncreate partition primary size=1024\n");
@@ -43,45 +37,36 @@ public sealed class DiskpartServiceTests
     [InlineData("There is not enough usable space for this operation.")]
     [InlineData("The arguments specified are not valid.")]
     [InlineData("Access is denied.")]
-    public async Task ParseOutput_ErrorPhrases_ReturnFailure(string errorOutput)
+    [InlineData("Virtual Disk Service error:\r\nThe volume is in use.")]
+    [InlineData("The specified disk is not valid.\r\nPlease select a valid disk.")]
+    [InlineData("There is no disk selected.\r\nPlease select a disk and try again.")]
+    [InlineData("The specified partition is not valid.\r\nPlease select a valid partition.")]
+    [InlineData("There is no partition selected.\r\nPlease select a partition and try again.")]
+    [InlineData("DiskPart was unable to clean the disk.\r\nThe data on this disk may be unrecoverable.")]
+    public void ContainsError_ErrorPhrases_ReturnsTrue(string errorOutput)
     {
-        // Use reflection or internal visibility to test ParseOutput logic
-        // Test via ExecuteScriptAsync with a mocked script that produces known output
-        // Since we can't run diskpart, test the success detection logic indirectly
-        // by checking the ContainsError logic through a helper
-
-        // We expose this as internal for testability
-        var svc = CreateService();
-        var result = await svc.ExecuteScriptAsync_WithOutput(errorOutput);
-        Assert.False(result.Success);
+        Assert.True(DiskpartService.ContainsError(errorOutput));
     }
 
     [Fact]
-    public async Task ParseOutput_SuccessOutput_ReturnsSuccess()
+    public void ContainsError_SelectingMissingPartitionThenDeleting_ReturnsTrue()
     {
-        var svc = CreateService();
-        var successOutput = "DiskPart successfully assigned the drive letter or mount point.";
-        var result = await svc.ExecuteScriptAsync_WithOutput(successOutput);
-        Assert.True(result.Success);
+        // diskpart output for "select partition 0" followed by "delete partition":
+        // no "error" keyword and exit code 0, yet nothing was deleted.
+        var output =
+            "Microsoft DiskPart version 10.0.26100.1150\r\n\r\n" +
+            "Disk 1 is now the selected disk.\r\n\r\n" +
+            "The specified partition is not valid.\r\nPlease select a valid partition.\r\n\r\n" +
+            "There is no partition selected.\r\nPlease select a partition and try again.\r\n";
+        Assert.True(DiskpartService.ContainsError(output));
     }
-}
 
-// Extension to DiskpartService for testing the output parsing in isolation
-internal static class DiskpartServiceTestExtensions
-{
-    public static Task<DiskpartResult> ExecuteScriptAsync_WithOutput(this DiskpartService svc, string fakeOutput)
+    [Theory]
+    [InlineData("DiskPart successfully assigned the drive letter or mount point.")]
+    [InlineData("Disk 1 is now the selected disk.\r\n\r\nDiskPart succeeded in cleaning the disk.")]
+    [InlineData("Disk 1 is now the selected disk.\r\n\r\nPartition 3 is now the selected partition.\r\n\r\nDiskPart successfully deleted the selected partition.")]
+    public void ContainsError_SuccessOutput_ReturnsFalse(string successOutput)
     {
-        // Test the output parsing logic directly without running diskpart
-        // We inspect the success logic by checking against known error phrases
-        var errorPhrases = new[]
-        {
-            "DiskPart has encountered an error",
-            "There is not enough usable space",
-            "The arguments specified are not valid",
-            "Access is denied",
-            "Virtual Disk Service error",
-        };
-        var hasError = errorPhrases.Any(p => fakeOutput.Contains(p, StringComparison.OrdinalIgnoreCase));
-        return Task.FromResult(new DiskpartResult(!hasError, fakeOutput, null));
+        Assert.False(DiskpartService.ContainsError(successOutput));
     }
 }

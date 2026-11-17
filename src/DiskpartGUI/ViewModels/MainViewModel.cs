@@ -14,7 +14,7 @@ public sealed class MainViewModel : ViewModelBase
     private readonly IDialogService _dialogService;
 
     private DiskItemViewModel? _selectedDisk;
-    private bool _isLoading;
+    private int _busyCount;
     private string _statusMessage = "Ready";
 
     public ObservableCollection<DiskItemViewModel> Disks { get; } = [];
@@ -25,22 +25,18 @@ public sealed class MainViewModel : ViewModelBase
         set
         {
             if (SetProperty(ref _selectedDisk, value))
-            {
-                ((AsyncRelayCommand)AddPartitionCommand).RaiseCanExecuteChanged();
-                ((AsyncRelayCommand)DeletePartitionCommand).RaiseCanExecuteChanged();
-                ((AsyncRelayCommand)ResizePartitionCommand).RaiseCanExecuteChanged();
-                ((AsyncRelayCommand)MovePartitionCommand).RaiseCanExecuteChanged();
-            }
+                RaiseCommandStates();
         }
     }
 
     public PartitionItemViewModel? SelectedPartition => SelectedDisk?.SelectedPartition;
 
-    public bool IsLoading
-    {
-        get => _isLoading;
-        private set => SetProperty(ref _isLoading, value);
-    }
+    /// <summary>
+    /// True while a disk read or diskpart operation is running. The window shows a progress
+    /// overlay and every command is disabled, so a second operation can't start against stale
+    /// state and the selection can't change mid-operation.
+    /// </summary>
+    public bool IsBusy => _busyCount > 0;
 
     public string StatusMessage
     {
@@ -53,6 +49,7 @@ public sealed class MainViewModel : ViewModelBase
     public AsyncRelayCommand DeletePartitionCommand { get; }
     public AsyncRelayCommand ResizePartitionCommand { get; }
     public AsyncRelayCommand MovePartitionCommand { get; }
+    public AsyncRelayCommand WipeDiskCommand { get; }
     public RelayCommand AboutCommand { get; }
 
     public MainViewModel(
@@ -66,17 +63,59 @@ public sealed class MainViewModel : ViewModelBase
         _moveService      = moveService      ?? throw new ArgumentNullException(nameof(moveService));
         _dialogService    = dialogService    ?? throw new ArgumentNullException(nameof(dialogService));
 
-        RefreshCommand        = new AsyncRelayCommand(RefreshAsync, onError: HandleError);
-        AddPartitionCommand   = new AsyncRelayCommand(AddPartitionAsync, () => SelectedDisk is not null, onError: HandleError);
-        DeletePartitionCommand = new AsyncRelayCommand(DeletePartitionAsync, () => SelectedPartition is not null, onError: HandleError);
-        ResizePartitionCommand = new AsyncRelayCommand(ResizePartitionAsync, () => SelectedPartition is not null, onError: HandleError);
-        MovePartitionCommand  = new AsyncRelayCommand(MovePartitionAsync, () => SelectedPartition is not null, onError: HandleError);
+        RefreshCommand        = new AsyncRelayCommand(RefreshAsync, () => !IsBusy, onError: HandleError);
+        AddPartitionCommand   = new AsyncRelayCommand(AddPartitionAsync, () => !IsBusy && SelectedDisk is not null, onError: HandleError);
+        DeletePartitionCommand = new AsyncRelayCommand(DeletePartitionAsync, () => !IsBusy && SelectedPartition is not null, onError: HandleError);
+        ResizePartitionCommand = new AsyncRelayCommand(ResizePartitionAsync, () => !IsBusy && SelectedPartition is not null, onError: HandleError);
+        MovePartitionCommand  = new AsyncRelayCommand(MovePartitionAsync, () => !IsBusy && SelectedPartition is not null, onError: HandleError);
+        WipeDiskCommand       = new AsyncRelayCommand(WipeDiskAsync, () => !IsBusy && SelectedDisk is not null, onError: HandleError);
         AboutCommand          = new RelayCommand(() => _dialogService.ShowAboutDialog());
+    }
+
+    private void RaiseCommandStates()
+    {
+        RefreshCommand.RaiseCanExecuteChanged();
+        AddPartitionCommand.RaiseCanExecuteChanged();
+        DeletePartitionCommand.RaiseCanExecuteChanged();
+        ResizePartitionCommand.RaiseCanExecuteChanged();
+        MovePartitionCommand.RaiseCanExecuteChanged();
+        WipeDiskCommand.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>Marks the view model busy until the returned scope is disposed. Scopes nest.</summary>
+    private IDisposable BeginBusy()
+    {
+        if (++_busyCount == 1)
+        {
+            OnPropertyChanged(nameof(IsBusy));
+            RaiseCommandStates();
+        }
+        return new BusyScope(this);
+    }
+
+    private void EndBusy()
+    {
+        if (--_busyCount == 0)
+        {
+            OnPropertyChanged(nameof(IsBusy));
+            RaiseCommandStates();
+        }
+    }
+
+    private sealed class BusyScope(MainViewModel owner) : IDisposable
+    {
+        private MainViewModel? _owner = owner;
+
+        public void Dispose()
+        {
+            _owner?.EndBusy();
+            _owner = null;
+        }
     }
 
     public async Task RefreshAsync(CancellationToken ct = default)
     {
-        IsLoading = true;
+        using var busy = BeginBusy();
         StatusMessage = "Loading disks...";
         try
         {
@@ -92,16 +131,16 @@ public sealed class MainViewModel : ViewModelBase
                         e.PropertyName == nameof(DiskItemViewModel.SelectedItem))
                     {
                         OnPropertyChanged(nameof(SelectedPartition));
-                        ((AsyncRelayCommand)DeletePartitionCommand).RaiseCanExecuteChanged();
-                        ((AsyncRelayCommand)ResizePartitionCommand).RaiseCanExecuteChanged();
-                        ((AsyncRelayCommand)MovePartitionCommand).RaiseCanExecuteChanged();
+                        RaiseCommandStates();
                     }
                 };
 
                 var partitions = await _diskService.GetPartitionsAsync(disk.DiskNumber, ct);
                 foreach (var partition in partitions)
                 {
-                    var logicalDisk = await _diskService.GetLogicalDiskAsync(disk.DiskNumber, partition.PartitionIndex, ct);
+                    var logicalDisk = partition.PartitionIndex == PartitionInfo.NoWmiIndex
+                        ? null
+                        : await _diskService.GetLogicalDiskAsync(disk.DiskNumber, partition.PartitionIndex, ct);
                     diskVm.Partitions.Add(new PartitionItemViewModel(partition, logicalDisk));
                 }
                 diskVm.BuildDisplayItems();
@@ -131,155 +170,207 @@ public sealed class MainViewModel : ViewModelBase
             StatusMessage = $"Error loading disks: {ex.Message}";
             throw;
         }
-        finally
-        {
-            IsLoading = false;
-        }
     }
 
     private async Task AddPartitionAsync(CancellationToken ct)
     {
         if (SelectedDisk is null) return;
 
-        // Approximate available space: total disk - sum of partition sizes
-        var usedBytes = SelectedDisk.Partitions.Sum(p => p.SizeBytes);
-        var availableMb = (SelectedDisk.SizeBytes - usedBytes) / (1024 * 1024);
-        if (availableMb <= 0)
+        // A partition must fit in one contiguous region, so offer the largest one (not the sum
+        // of all free space) and tell diskpart exactly where it starts.
+        var region = SelectedDisk.LargestFreeRegion;
+        var availableMb = region is null ? 0 : region.SizeBytes / DiskAlignment.MiB;
+        if (region is null || availableMb <= 0)
         {
             _dialogService.ShowError("No Space Available", "There is no unallocated space on this disk.");
             return;
         }
 
+        var diskNumber = SelectedDisk.DiskNumber;
         var vm = new AddPartitionViewModel(availableMb);
         var result = _dialogService.ShowAddPartitionDialog(vm);
         if (result != true) return;
 
-        StatusMessage = "Adding partition...";
-        var diskResult = await _partitionService.AddPartitionAsync(
-            SelectedDisk.DiskNumber, vm.SizeMb, vm.Label, vm.FileSystem, ct);
+        // At the maximum, omit size= so diskpart fills the region exactly instead of failing
+        // on a few KB of rounding.
+        long? sizeMb = vm.SizeMb >= availableMb ? null : vm.SizeMb;
+        long offsetKb = region.StartOffsetBytes / 1024;
 
-        if (diskResult.Success)
+        string errorMsg;
+        using (BeginBusy())
         {
-            StatusMessage = "Partition added successfully.";
-            await RefreshAsync(ct);
+            StatusMessage = $"Adding partition to disk {diskNumber}...";
+            var diskResult = await _partitionService.AddPartitionAsync(
+                diskNumber, sizeMb, offsetKb, vm.Label, vm.FileSystem, ct);
+
+            if (diskResult.Success)
+            {
+                await RefreshAsync(ct);
+                StatusMessage = "Partition added successfully.";
+                return;
+            }
+            errorMsg = ExtractDiskpartError(diskResult.Output);
         }
-        else
-        {
-            var errorMsg = ExtractDiskpartError(diskResult.Output);
-            StatusMessage = $"Failed to add partition.";
-            _dialogService.ShowError("Add Partition Failed", errorMsg);
-        }
+
+        StatusMessage = "Failed to add partition.";
+        _dialogService.ShowError("Add Partition Failed", errorMsg);
     }
 
     private async Task DeletePartitionAsync(CancellationToken ct)
     {
         if (SelectedDisk is null || SelectedPartition is null) return;
+        if (!TryGetDiskpartPartitionNumber(SelectedPartition, "Delete Partition Failed", out var partitionNumber)) return;
 
-        var desc = $"Disk {SelectedDisk.DiskNumber}, Partition {SelectedPartition.PartitionIndex} ({SelectedPartition.DisplaySize})";
+        var diskNumber = SelectedDisk.DiskNumber;
+        var desc = $"Disk {diskNumber}, Partition {partitionNumber} ({SelectedPartition.DisplaySize})";
         var isSystemOrBoot = SelectedPartition.IsBootable || SelectedPartition.IsActive;
 
         var vm = new DeletePartitionViewModel(desc, isSystemOrBoot);
         var result = _dialogService.ShowDeletePartitionDialog(vm);
         if (result != true) return;
 
-        StatusMessage = "Deleting partition...";
-        var diskResult = await _partitionService.DeletePartitionAsync(
-            SelectedDisk.DiskNumber, SelectedPartition.PartitionIndex, vm.ForceOverride, ct);
+        string errorMsg;
+        using (BeginBusy())
+        {
+            StatusMessage = $"Deleting partition {partitionNumber} on disk {diskNumber}...";
+            var diskResult = await _partitionService.DeletePartitionAsync(
+                diskNumber, partitionNumber, vm.ForceOverride, ct);
 
-        if (diskResult.Success)
-        {
-            StatusMessage = "Partition deleted successfully.";
-            await RefreshAsync(ct);
+            if (diskResult.Success)
+            {
+                await RefreshAsync(ct);
+                StatusMessage = "Partition deleted successfully.";
+                return;
+            }
+            errorMsg = ExtractDiskpartError(diskResult.Output);
         }
-        else
-        {
-            var errorMsg = ExtractDiskpartError(diskResult.Output);
-            StatusMessage = "Failed to delete partition.";
-            _dialogService.ShowError("Delete Partition Failed", errorMsg);
-        }
+
+        StatusMessage = "Failed to delete partition.";
+        _dialogService.ShowError("Delete Partition Failed", errorMsg);
     }
 
     private async Task ResizePartitionAsync(CancellationToken ct)
     {
         if (SelectedDisk is null || SelectedPartition is null) return;
 
-        var currentSizeMb = SelectedPartition.SizeBytes / (1024 * 1024);
+        // Capture the target now: everything below must act on the partition the user clicked,
+        // even if the selection changes while diskpart runs.
+        var disk = SelectedDisk;
+        var partition = SelectedPartition;
+        var currentSizeMb = partition.SizeBytes / (1024 * 1024);
 
         // Compute contiguous free space immediately after this partition, not total disk free.
         // Total disk free overshoots due to GPT overhead and non-adjacent free regions.
-        var partEnd = SelectedPartition.StartingOffset + SelectedPartition.SizeBytes;
-        var nextStart = SelectedDisk.Partitions
+        var partEnd = partition.StartingOffset + partition.SizeBytes;
+        var nextStart = disk.Partitions
             .Where(p => p.StartingOffset >= partEnd)
             .OrderBy(p => p.StartingOffset)
             .Select(p => (long?)p.StartingOffset)
             .FirstOrDefault();
-        var adjacentFreeBytes = (nextStart ?? SelectedDisk.SizeBytes) - partEnd;
-        var availableMb = adjacentFreeBytes / (1024 * 1024);
+        var adjacentFreeBytes = Math.Max(0, (nextStart ?? DiskAlignment.UsableEnd(disk.SizeBytes)) - partEnd);
 
-        StatusMessage = "Checking resize limits…";
+        // Extend grows the partition and then the NTFS file system inside it; anything else
+        // would leave the new space stranded, so only offer it where it can finish.
+        string? extendBlockedReason =
+            !string.Equals(partition.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
+                ? $"Extend is only supported for NTFS volumes (this one is {partition.FileSystem ?? "not formatted"})."
+            : string.IsNullOrEmpty(partition.DriveLetter)
+                ? "Extend needs the volume to have a drive letter."
+            : null;
+        var availableMb = extendBlockedReason is null ? adjacentFreeBytes / DiskAlignment.MiB : 0;
+
+        var partitionNumber = partition.PartitionNumber;
         long maxShrinkMb;
-        try
+        if (partitionNumber is null)
         {
-            maxShrinkMb = await _partitionService.QueryShrinkMaxAsync(
-                SelectedDisk.DiskNumber, SelectedPartition.PartitionIndex, ct);
+            maxShrinkMb = 0; // diskpart can't address this partition: shrink disabled, extend still allowed
         }
-        catch
+        else
         {
-            maxShrinkMb = currentSizeMb - 8; // fallback: allow full range
+            using (BeginBusy())
+            {
+                StatusMessage = "Checking resize limits…";
+                try
+                {
+                    maxShrinkMb = await _partitionService.QueryShrinkMaxAsync(
+                        disk.DiskNumber, partitionNumber.Value, ct);
+                }
+                catch
+                {
+                    maxShrinkMb = currentSizeMb - 8; // fallback: allow full range
+                }
+                StatusMessage = "Ready";
+            }
         }
 
-        var vm = new ResizePartitionViewModel(currentSizeMb, availableMb, maxShrinkMb);
+        var vm = new ResizePartitionViewModel(currentSizeMb, availableMb, maxShrinkMb, extendBlockedReason);
         var result = _dialogService.ShowResizePartitionDialog(vm);
         if (result != true) return;
 
-        DiskpartResult diskResult;
-        if (vm.Operation == ResizeOperation.Shrink)
+        string errorMsg;
+        using (BeginBusy())
         {
-            StatusMessage = "Shrinking partition...";
-            diskResult = await _partitionService.ShrinkPartitionAsync(
-                SelectedDisk.DiskNumber, SelectedPartition.PartitionIndex, vm.DeltaMb, ct);
-        }
-        else
-        {
-            StatusMessage = "Extending partition...";
-            // Use raw IOCTL_DISK_GROW_PARTITION + FSCTL_EXTEND_VOLUME instead of diskpart.
-            // diskpart's extend relies on VDS which caches stale layouts after raw moves;
-            // the raw IOCTLs go directly to partmgr and NTFS, bypassing VDS entirely.
-            long growByBytes = vm.NewSizeMb >= vm.MaxSizeMb
-                ? adjacentFreeBytes          // exact bytes for max extend
-                : vm.DeltaMb * 1024L * 1024L;
-            try
+            DiskpartResult diskResult;
+            if (vm.Operation == ResizeOperation.Shrink)
             {
-                await _moveService.ExtendPartitionRawAsync(
-                    SelectedDisk.DiskNumber,
-                    SelectedPartition.StartingOffset,
-                    growByBytes,
-                    SelectedPartition.DriveLetter,
-                    ct);
-                diskResult = new DiskpartResult(true, string.Empty, null);
+                if (!TryGetDiskpartPartitionNumber(partition, "Resize Partition Failed", out var shrinkPartitionNumber)) return;
+                StatusMessage = $"Shrinking partition {shrinkPartitionNumber} on disk {disk.DiskNumber}...";
+                diskResult = await _partitionService.ShrinkPartitionAsync(
+                    disk.DiskNumber, shrinkPartitionNumber, vm.DeltaMb, ct);
             }
-            catch (Exception ex)
+            else
             {
-                diskResult = new DiskpartResult(false, ex.Message, null);
+                StatusMessage = $"Extending partition on disk {disk.DiskNumber}...";
+                // Use raw IOCTL_DISK_GROW_PARTITION + FSCTL_EXTEND_VOLUME instead of diskpart.
+                // diskpart's extend relies on VDS which caches stale layouts after raw moves;
+                // the raw IOCTLs go directly to partmgr and NTFS, bypassing VDS entirely.
+                long growByBytes = vm.NewSizeMb >= vm.MaxSizeMb
+                    ? adjacentFreeBytes          // exact bytes for max extend
+                    : vm.DeltaMb * 1024L * 1024L;
+                try
+                {
+                    await _moveService.ExtendPartitionRawAsync(
+                        disk.DiskNumber,
+                        partition.StartingOffset,
+                        growByBytes,
+                        partition.DriveLetter,
+                        ct);
+                    diskResult = new DiskpartResult(true, string.Empty, null);
+                }
+                catch (Exception ex)
+                {
+                    diskResult = new DiskpartResult(false, ex.Message, null);
+                }
             }
+
+            if (diskResult.Success)
+            {
+                await RefreshAsync(ct);
+                StatusMessage = $"Partition {(vm.Operation == ResizeOperation.Shrink ? "shrunk" : "extended")} successfully.";
+                return;
+            }
+            errorMsg = ExtractDiskpartError(diskResult.Output);
         }
 
-        if (diskResult.Success)
-        {
-            StatusMessage = $"Partition {(vm.Operation == ResizeOperation.Shrink ? "shrunk" : "extended")} successfully.";
-            await RefreshAsync(ct);
-        }
-        else
-        {
-            var errorMsg = ExtractDiskpartError(diskResult.Output);
-            StatusMessage = "Failed to resize partition.";
-            _dialogService.ShowError("Resize Partition Failed", errorMsg);
-        }
+        StatusMessage = "Failed to resize partition.";
+        _dialogService.ShowError("Resize Partition Failed", errorMsg);
     }
 
     private async Task MovePartitionAsync(CancellationToken ct)
     {
         if (SelectedDisk is null || SelectedPartition is null) return;
+
+        // Moving these breaks booting: boot records and BCD refer to them by position, and the
+        // running Windows volume can't be locked anyway.
+        var systemDrive = Environment.GetEnvironmentVariable("SystemDrive");
+        if (SelectedPartition.IsBootable || SelectedPartition.IsActive ||
+            (SelectedPartition.DriveLetter is not null &&
+             string.Equals(SelectedPartition.DriveLetter, systemDrive, StringComparison.OrdinalIgnoreCase)))
+        {
+            _dialogService.ShowError("Move Partition",
+                "Boot, system and Windows partitions can't be moved: Windows locates them by their position on the disk.");
+            return;
+        }
 
         var allPartitions = SelectedDisk.Partitions.Select(p => p.Partition).ToList();
         var regions = _moveService.GetFreeSpaceRegions(
@@ -293,7 +384,7 @@ public sealed class MainViewModel : ViewModelBase
             return;
         }
 
-        var desc = $"Disk {SelectedDisk.DiskNumber}, Partition {SelectedPartition.PartitionIndex} ({SelectedPartition.DisplaySize}) — currently at offset {SelectedPartition.DisplayOffset}";
+        var desc = $"Disk {SelectedDisk.DiskNumber}, Partition {SelectedPartition.PartitionNumber?.ToString() ?? "?"} ({SelectedPartition.DisplaySize}) — currently at offset {SelectedPartition.DisplayOffset}";
         var srcOffset = SelectedPartition.StartingOffset;
         var sizeBytes = SelectedPartition.SizeBytes;
         var driveLetter = SelectedPartition.DriveLetter;
@@ -307,12 +398,85 @@ public sealed class MainViewModel : ViewModelBase
             srcOffset,
             sizeBytes);
 
-        var result = _dialogService.ShowMovePartitionDialog(vm);
-        if (result == true)
+        _dialogService.ShowMovePartitionDialog(vm);
+
+        // Refresh however the dialog was closed (Close button or X): after a completed or failed
+        // move the old layout is stale, and acting on it could overwrite the moved partition.
+        if (!vm.IsComplete && !vm.IsCancelled && !vm.IsFailed) return;
+        await RefreshAsync(ct);
+        StatusMessage = vm.IsComplete ? "Partition moved successfully."
+                      : vm.IsFailed   ? "Move failed. See the message in the Move dialog."
+                      : "Move cancelled. The partition was not moved.";
+    }
+
+    private async Task WipeDiskAsync(CancellationToken ct)
+    {
+        if (SelectedDisk is null) return;
+        var disk = SelectedDisk;
+
+        // diskpart refuses this too, but never offer to wipe the disk Windows is running from.
+        if (disk.IsSystemDisk)
         {
-            StatusMessage = "Partition moved successfully.";
-            await RefreshAsync(ct);
+            StatusMessage = "Cannot wipe the system disk.";
+            _dialogService.ShowError("Wipe Disk",
+                $"Disk {disk.DiskNumber} holds the running Windows installation and cannot be wiped.");
+            return;
         }
+
+        var desc = $"Disk {disk.DiskNumber} — {disk.Model} ({disk.DisplaySize})";
+        var partitions = disk.Partitions
+            .OrderBy(p => p.StartingOffset)
+            .Select(DescribePartition)
+            .ToList();
+
+        var vm = new WipeDiskViewModel(desc, partitions);
+        var result = _dialogService.ShowWipeDiskDialog(vm);
+        if (result != true || !vm.Confirmed) return;
+
+        string errorMsg;
+        using (BeginBusy())
+        {
+            StatusMessage = $"Wiping disk {disk.DiskNumber}...";
+            var diskResult = await _partitionService.CleanDiskAsync(disk.DiskNumber, ct);
+
+            if (diskResult.Success)
+            {
+                await RefreshAsync(ct);
+                StatusMessage = $"Disk {disk.DiskNumber} wiped. It is now empty and uninitialized.";
+                return;
+            }
+            errorMsg = ExtractDiskpartError(diskResult.Output);
+        }
+
+        StatusMessage = "Failed to wipe disk.";
+        _dialogService.ShowError("Wipe Disk Failed", errorMsg);
+    }
+
+    private static string DescribePartition(PartitionItemViewModel p)
+    {
+        var name = p.PartitionNumber is int n ? $"Partition {n}" : "Partition";
+        var letter = string.IsNullOrEmpty(p.DriveLetter) ? string.Empty : $" — {p.DriveLetter}";
+        var label = string.IsNullOrEmpty(p.VolumeName) ? string.Empty : $" \"{p.VolumeName}\"";
+        return $"{name}{letter}{label} ({p.DisplaySize}, {p.Type})";
+    }
+
+    /// <summary>
+    /// diskpart's <c>select partition N</c> needs the real partition number, not the WMI index.
+    /// Refuse the operation rather than guess, since a wrong number targets a different partition.
+    /// </summary>
+    private bool TryGetDiskpartPartitionNumber(PartitionItemViewModel partition, string errorTitle, out int partitionNumber)
+    {
+        if (partition.PartitionNumber is int number)
+        {
+            partitionNumber = number;
+            return true;
+        }
+
+        partitionNumber = 0;
+        StatusMessage = "Could not determine the partition number.";
+        _dialogService.ShowError(errorTitle,
+            "Could not determine this partition's number for diskpart. Click Refresh and try again.");
+        return false;
     }
 
     private void HandleError(Exception ex)
@@ -324,7 +488,11 @@ public sealed class MainViewModel : ViewModelBase
     private static string ExtractDiskpartError(string output)
     {
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        var idx = lines.ToList().FindIndex(l => l.Contains("error", StringComparison.OrdinalIgnoreCase));
+        // Prefer a known diskpart error phrase (some, like "The specified partition is not valid.",
+        // don't contain the word "error"), then fall back to any line mentioning "error".
+        var idx = Array.FindIndex(lines, DiskpartService.ContainsError);
+        if (idx < 0)
+            idx = Array.FindIndex(lines, l => l.Contains("error", StringComparison.OrdinalIgnoreCase));
         if (idx < 0) return output.Trim();
         // VDS errors are two lines: "Virtual Disk Service error:" + detail on the next line
         var errorLine = lines[idx].Trim();

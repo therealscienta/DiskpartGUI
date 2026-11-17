@@ -15,6 +15,12 @@ public sealed class DiskpartService : IPartitionService
         "The arguments specified are not valid",
         "Access is denied",
         "Virtual Disk Service error",
+        // Invalid selections: diskpart prints these and then ignores every following command
+        "The specified disk is not valid",
+        "There is no disk selected",
+        "The specified partition is not valid",
+        "There is no partition selected",
+        "DiskPart was unable to clean the disk",
     ];
 
     private readonly Func<IScriptBuilder> _builderFactory;
@@ -25,11 +31,11 @@ public sealed class DiskpartService : IPartitionService
     }
 
     public Task<DiskpartResult> AddPartitionAsync(
-        int diskNumber, long sizeMb, string? label, string filesystemType, CancellationToken ct = default)
+        int diskNumber, long? sizeMb, long? offsetKb, string? label, string filesystemType, CancellationToken ct = default)
     {
         var builder = _builderFactory()
             .SelectDisk(diskNumber)
-            .CreatePartitionPrimary(sizeMb)
+            .CreatePartitionPrimary(sizeMb, offsetKb)
             .FormatPartition(filesystemType, label ?? "New Volume", quick: true)
             .AssignLetter();
 
@@ -43,6 +49,15 @@ public sealed class DiskpartService : IPartitionService
             .SelectDisk(diskNumber)
             .SelectPartition(partitionNumber)
             .DeletePartition(overrideProtected: forceOverride);
+
+        return ExecuteScriptAsync(builder.Build(), ct);
+    }
+
+    public Task<DiskpartResult> CleanDiskAsync(int diskNumber, CancellationToken ct = default)
+    {
+        var builder = _builderFactory()
+            .SelectDisk(diskNumber)
+            .Clean();
 
         return ExecuteScriptAsync(builder.Build(), ct);
     }
@@ -140,6 +155,6 @@ public sealed class DiskpartService : IPartitionService
         }
     }
 
-    private static bool ContainsError(string output)
+    internal static bool ContainsError(string output)
         => ErrorPhrases.Any(phrase => output.Contains(phrase, StringComparison.OrdinalIgnoreCase));
 }

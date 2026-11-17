@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:converters="clr-namespace:DiskpartGUI.Converters"
         Title="Move Partition"
-        Width="500" Height="500"
+        Width="500" SizeToContent="Height"
         Background="#16213E"
         Foreground="#ECF0F1"
         WindowStartupLocation="CenterOwner"
@@ -71,8 +71,8 @@
                     <TextBlock Foreground="#E67E22" FontSize="12" TextWrapping="Wrap">
                         <Run FontWeight="SemiBold">⚠  Warning: </Run>
                         <Run>All partition data will be physically copied sector-by-sector. This may take
-several minutes for large partitions. Do not power off your computer during the
-operation. The original partition remains intact if you cancel before completion.</Run>
+several minutes for large partitions. Do not power off your computer or unplug the disk
+during the operation. The original partition remains intact if you cancel before completion.</Run>
                     </TextBlock>
                 </Border>
             </StackPanel>
@@ -109,6 +109,20 @@ operation. The original partition remains intact if you cancel before completion
                             FallbackValue=Collapsed}">
                     <TextBlock Text="{Binding StatusMessage}" Foreground="#E74C3C"
                                FontSize="12" TextWrapping="Wrap"/>
+                </Border>
+
+                <!-- Failed: the message says what state the disk was left in -->
+                <Border Background="#2C1F1F" BorderBrush="#E74C3C" BorderThickness="1"
+                        CornerRadius="4" Padding="12,10"
+                        Visibility="{Binding IsFailed,
+                            Converter={StaticResource BoolToVis},
+                            FallbackValue=Collapsed}">
+                    <StackPanel>
+                        <TextBlock Text="Move failed" Foreground="#E74C3C" FontSize="12"
+                                   FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBlock Text="{Binding ErrorMessage}" Foreground="#ECF0F1"
+                                   FontSize="12" TextWrapping="Wrap"/>
+                    </StackPanel>
                 </Border>
             </StackPanel>
         </Grid>

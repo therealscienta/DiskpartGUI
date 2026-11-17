@@ -4,7 +4,7 @@ Context for AI assistants working in this repository.
 
 ## Project Overview
 
-C# WPF desktop application — a GUI frontend for the Windows `diskpart` command-line tool plus raw Win32 disk I/O. Users can view disk and partition information, and perform add, delete, resize, and move partition operations.
+C# WPF desktop application — a GUI frontend for the Windows `diskpart` command-line tool plus raw Win32 disk I/O. Users can view disk and partition information, perform add, delete, resize, and move partition operations, and wipe a whole disk (`diskpart clean`).
 
 **Target:** Windows 10 1809+ x64, .NET 10, WPF
 
@@ -64,6 +64,26 @@ See `WmiDiskService` — all public methods delegate to `Task.Run`.
 `app.manifest` sets `requestedExecutionLevel level="requireAdministrator"`.
 Do **NOT** set `ProcessStartInfo.Verb = "runas"` when launching diskpart — this causes a second UAC prompt.
 
+### WMI partition Index is not the diskpart partition number
+`Win32_DiskPartition.Index` is 0-based and skips partitions WMI hides (e.g. GPT MSR), so on a GPT disk the EFI partition can be WMI index 0 but partition 2 to diskpart. `select partition <wrong N>` either fails silently or selects a **different partition**.
+`WmiDiskService` resolves the real number from `MSFT_Partition.PartitionNumber` (`root\Microsoft\Windows\Storage`), matched by starting offset, into `PartitionInfo.PartitionNumber`. Always pass `PartitionNumber` to diskpart; use `PartitionIndex` only for WMI `DeviceID` lookups. If `PartitionNumber` is null, refuse the operation.
+Partitions WMI hides (MSR) are added from `MSFT_Partition` with `PartitionIndex = PartitionInfo.NoWmiIndex`; without them their space looked unallocated and was offered as a Move destination. MBR extended containers are skipped (they overlap their logical partitions).
+
+### Win32_DiskDrive.Size is rounded down
+It is cylinders × heads × sectors, up to ~8 MB short of the real size; partitions can end past it. `DiskInfo.SizeBytes` uses `MSFT_Disk.Size` when available.
+
+### Reserved areas and alignment live in `DiskAlignment`
+The first MiB (MBR / GPT header) and the last 132 KiB (backup GPT) are never free space, and new partition / move destinations are MiB-aligned. `DiskItemViewModel.BuildDisplayItems`, Add Partition (`LargestFreeRegion`), Extend and `GetFreeSpaceRegions` all use it — don't compute free space by hand.
+
+### WPF projects don't get `System.IO` as an implicit using
+WPF removes it (it clashes with `System.Windows.Shapes.Path`). Add `using System.IO;` where you need `IOException`, `File`, etc.
+
+### Wrap every slow operation in `BeginBusy()`
+`MainViewModel.BeginBusy()` returns a nestable scope that sets `IsBusy`, disables every command and shows the progress overlay in `MainWindow.xaml` (which also blocks clicks, so the selection can't change mid-operation). Wrap diskpart/WMI awaits in it, but **not** modal dialogs, and close the scope before calling `ShowError`. Capture `SelectedDisk`/`SelectedPartition` into locals before the first await.
+
+### Wipe Disk must never target the Windows disk
+`DiskInfo.IsSystemDisk` comes from `MSFT_Disk.IsBoot`/`IsSystem`; `DiskItemViewModel.IsSystemDisk` also treats any disk holding `%SystemDrive%` as a system disk in case the Storage query fails. `MainViewModel.WipeDiskAsync` refuses such disks before showing the dialog. Note `Win32_DiskPartition.BootPartition` is **not** usable for this: it is true for the EFI partition on any GPT USB stick.
+
 ### WMI size fields return UInt64, not long
 `ManagementObject["Size"]` is `UInt64` boxed as `object`. Cast with `Convert.ToInt64(obj["Size"])`, not `(long)`.
 
@@ -73,12 +93,18 @@ The packaging project uses `rescap:Capability Name="runFullTrust"` which allows 
 ### "Move Partition" uses raw sector I/O, not diskpart
 diskpart has no move command. The move feature opens `\\.\PhysicalDriveN` directly via Win32 `ReadFile`/`WriteFile`.
 Copy direction matters: moving left → copy forward, moving right → copy backward (same as `memmove`).
-The partition table is updated **after** the full copy so cancellation leaves the source intact.
+Safety model, in order — keep all of it when changing the move code:
+1. `RawDiskMoveService.ValidateMove` checks the move against the **live** layout (`IOCTL_DISK_GET_DRIVE_LAYOUT_EX`) before any write: source exists with the same size, destination MiB-aligned, inside the GPT usable range (MBR: ≥ 1 MiB and ≤ disk length), overlapping neither the source nor any other entry (incl. extended containers). The WMI-based free-space list is only a suggestion.
+2. The volume is found by disk extents (`FindVolumeDevicePath`), so volumes without a drive letter are locked and dismounted too.
+3. Copy, then `FlushFileBuffers`, then update the partition table. Because the destination never overlaps the source, a failed or cancelled copy leaves the source intact.
+4. Failures throw `PartitionOperationException` whose message says what state the disk is in; the dialog shows it, and can't be closed mid-copy.
+5. Boot/system/Windows partitions are refused in `MainViewModel` (boot records reference them by position).
 
 ### "Extend Partition" uses raw IOCTLs, not diskpart
 diskpart's `extend` command goes through VDS (Virtual Disk Service), which caches stale partition layouts after a raw move — causing silent no-ops. The extend path uses:
 1. `IOCTL_DISK_GROW_PARTITION` — grows the partition table entry directly through partmgr (synchronous, bypasses VDS)
-2. `FSCTL_EXTEND_VOLUME` — extends the NTFS filesystem to fill the new space
+2. `FSCTL_EXTEND_VOLUME` — extends the NTFS filesystem to fill the partition. The target sector count comes from the volume's length (`IOCTL_DISK_GET_LENGTH_INFO`) minus the backup boot sector, so retries are safe.
+Only NTFS volumes with a drive letter are extended; both are checked **before** growing the partition.
 
 ### IOCTL_DISK_GROW_PARTITION triggers async PnP re-enumeration
 After `IOCTL_DISK_GROW_PARTITION` returns, partmgr asynchronously notifies the PnP manager, which may briefly take the volume offline for re-enumeration. Opening a volume handle (for `FSCTL_EXTEND_VOLUME`) immediately after `GrowPartition` can fail or get a stale handle. `RawDiskMoveService.ExtendNtfsWithRetry` retries with back-off (up to ~3 s) to let the volume settle before extending the filesystem.
@@ -152,7 +178,7 @@ src/DiskpartGUI/
 │                                   #   layout buffer helpers (BinaryPrimitives, no unsafe)
 ├── Services/
 │   ├── IDiskService.cs             # WMI read interface
-│   ├── IPartitionService.cs        # diskpart write interface (add/delete/resize/querymax)
+│   ├── IPartitionService.cs        # diskpart write interface (add/delete/resize/querymax/clean)
 │   ├── IPartitionMoveService.cs    # Raw move interface
 │   ├── IScriptBuilder.cs           # Fluent script builder interface
 │   ├── IDialogService.cs           # Dialog abstraction (for testability)
@@ -170,12 +196,13 @@ src/DiskpartGUI/
 │   ├── FreeSpaceItemViewModel.cs   # Wraps FreeSpaceRegion for display in bar + DataGrid
 │   ├── AddPartitionViewModel.cs    # Dialog VM
 │   ├── DeletePartitionViewModel.cs # Dialog VM
+│   ├── WipeDiskViewModel.cs        # Dialog VM (whole-disk clean confirmation)
 │   ├── ResizePartitionViewModel.cs # Dialog VM (MaxShrinkMb, MinNewSizeMb from querymax)
 │   └── MovePartitionViewModel.cs   # Dialog VM (two-phase: configure → in-progress)
 ├── Views/
 │   ├── MainWindow.xaml             # Shell: toolbar, disk list, detail panel, status bar
 │   ├── DiskDetailView.xaml         # Disk bar + partition DataGrid
-│   ├── Dialogs/                    # Add/Delete/Resize/Move/About dialogs (Window)
+│   ├── Dialogs/                    # Add/Delete/Resize/Move/Wipe/About dialogs (Window)
 │   └── Controls/DiskBar.xaml      # Proportional partition visualization
 ├── Converters/                     # BytesToHuman, BoolToVisibility, PartitionTypeToColor
 └── Resources/                      # Styles.xaml, Colors.xaml

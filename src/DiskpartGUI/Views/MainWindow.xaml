@@ -54,12 +54,10 @@
                     <Button Content="⇔  Resize Partition" Style="{StaticResource PrimaryButtonStyle}"
                             Command="{Binding ResizePartitionCommand}" Margin="0,0,8,0"/>
                     <Button Content="⇄  Move Partition" Style="{StaticResource PrimaryButtonStyle}"
-                            Command="{Binding MovePartitionCommand}"/>
-
-                    <!-- Loading indicator -->
-                    <TextBlock Text="Loading..." Foreground="#95A5A6" VerticalAlignment="Center"
-                               Margin="16,0,0,0"
-                               Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}"/>
+                            Command="{Binding MovePartitionCommand}" Margin="0,0,8,0"/>
+                    <Button Content="⌫  Wipe Disk" Style="{StaticResource DangerButtonStyle}"
+                            Command="{Binding WipeDiskCommand}"
+                            ToolTip="Remove every partition on the selected disk (diskpart clean)"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -123,8 +121,50 @@
             </Grid>
         </Grid>
 
+        <!-- Busy overlay: covers the disk list and details while an operation runs, so nothing
+             can be clicked or reselected. It is hit-testable immediately but fades in after a
+             short delay, so a quick refresh doesn't flash. -->
+        <Border Grid.Row="1" Background="#CC16213E"
+                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Opacity" Value="0"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                            <DataTrigger.EnterActions>
+                                <BeginStoryboard x:Name="BusyFadeIn">
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetProperty="Opacity" To="1"
+                                                         BeginTime="0:0:0.3" Duration="0:0:0.15"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </DataTrigger.EnterActions>
+                            <DataTrigger.ExitActions>
+                                <StopStoryboard BeginStoryboardName="BusyFadeIn"/>
+                            </DataTrigger.ExitActions>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <Border Background="#1A1A2E" BorderBrush="#34495E" BorderThickness="1" CornerRadius="6"
+                    Padding="24,18" MinWidth="340" MaxWidth="480"
+                    HorizontalAlignment="Center" VerticalAlignment="Center">
+                <StackPanel>
+                    <TextBlock Text="{Binding StatusMessage}" Foreground="#ECF0F1" FontSize="13"
+                               TextWrapping="Wrap" TextAlignment="Center"/>
+                    <ProgressBar IsIndeterminate="{Binding IsBusy}" Height="6" Margin="0,14,0,0"/>
+                    <TextBlock Text="Please wait. Don't unplug the disk." Foreground="#95A5A6"
+                               FontSize="11" Margin="0,10,0,0" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+        </Border>
+
         <!-- Status bar -->
         <StatusBar Grid.Row="2" Background="#1A1A2E" BorderThickness="0,1,0,0" BorderBrush="#34495E">
+            <StatusBarItem DockPanel.Dock="Right" Margin="0,0,8,0"
+                           Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
+                <ProgressBar IsIndeterminate="{Binding IsBusy}" Width="140" Height="6"/>
+            </StatusBarItem>
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="#95A5A6" FontSize="12" Padding="4,2"/>
             </StatusBarItem>
