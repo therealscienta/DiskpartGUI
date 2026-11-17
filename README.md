@@ -1,8 +1,10 @@
 # DiskpartGUI
 
-A modern Windows desktop application providing a graphical interface for the Windows `diskpart` utility and raw disk I/O. View all physical disks and their partitions, and perform add, delete, resize, and move operations — without touching the command line.
+A modern Windows desktop application providing a graphical interface for the Windows `diskpart` utility and raw disk I/O. View all physical disks and their partitions, and add, delete, resize and move partitions or wipe a whole disk — without touching the command line.
 
 ![Build](https://github.com/therealscienta/DiskpartGUI/actions/workflows/build.yml/badge.svg)
+
+![DiskpartGUI main window showing a USB drive with an NTFS partition, a FAT32 partition and unallocated space](docs/images/main-window.png)
 
 **Disclaimer:** This project is generated using AI! You are responsible for your own data - backup anything of value before using this, or any tool that might be destructive!
 
@@ -10,14 +12,18 @@ A modern Windows desktop application providing a graphical interface for the Win
 
 ## Features
 
-- **View all physical disks** with model, size, interface type, and status
+- **View all physical disks** with model, exact size, interface type, and status
 - **Visual partition bar** — proportional color-coded representation of each disk's layout, including unallocated regions
-- **Unallocated space** — free regions are shown as distinct items in both the disk bar and the partition list
+- **Every partition, numbered as diskpart sees it** — partition numbers match diskpart and Disk Management, and partitions WMI hides (such as the 16 MB Microsoft Reserved partition) are listed instead of showing up as free space
+- **Unallocated space** — usable free regions are shown in both the disk bar and the partition list; the reserved areas at the start and end of the disk are never counted as free
 - **Partition details** — drive letter, label, filesystem, size, offset, and boot flags
-- **Add partition** — create a new primary partition with configurable size, label, and filesystem (NTFS / FAT32 / exFAT)
+- **Add partition** — create a primary partition in the largest free region with configurable size, label, and filesystem (NTFS / FAT32 / exFAT); the size and label are checked against the filesystem's limits (FAT32 ≤ 32 GB, 11-character FAT labels) before anything is created
 - **Delete partition** — with protection for system/boot partitions and a force-override option
-- **Resize partition** — shrink or extend with a real-time shrink limit from `shrink querymax` (prevents silent partial shrinks caused by unmovable files like `pagefile.sys` or VSS snapshots); extend uses raw Win32 IOCTLs to bypass the VDS cache
-- **Move partition** — physically relocates a partition's data using raw sector I/O; safe cancellation leaves the source partition intact if aborted mid-copy
+- **Resize partition** — shrink or extend with a real-time shrink limit from `shrink querymax` (prevents silent partial shrinks caused by unmovable files like `pagefile.sys` or VSS snapshots); extend uses raw Win32 IOCTLs to bypass the VDS cache and is offered for NTFS volumes with a drive letter
+- **Move partition** — physically relocates a partition's data using raw sector I/O, checked against the live partition table first (see the safety model below); cancelling mid-copy leaves the source partition intact
+- **Wipe disk** — removes every partition on a disk (`diskpart clean`), leaving it empty and uninitialized; lists what will be erased, requires explicit confirmation, and refuses the disk Windows is running from
+- **Clear errors** — diskpart's own error message is shown when an operation fails, instead of a false "success"
+- **Progress indicator** — while an operation runs, a progress overlay shows what is happening and all actions are disabled, so a second operation can't start on stale data
 - **About dialog** — version, description, and GitHub link
 - **Portable** — runs as a single `.exe` with no installation required
 
@@ -84,6 +90,10 @@ dotnet publish src/DiskpartGUI/DiskpartGUI.csproj `
 ## Running Tests
 
 ```powershell
+# Unit tests (what CI runs)
+dotnet test tests/DiskpartGUI.Tests/DiskpartGUI.Tests.csproj --configuration Release --filter "Category!=Integration"
+
+# Everything, including integration tests that read (never write) this machine's real disks
 dotnet test tests/DiskpartGUI.Tests/DiskpartGUI.Tests.csproj --configuration Release
 ```
 
@@ -103,24 +113,25 @@ src/DiskpartGUI/
 ```
 
 **Technology choices:**
-- **WMI** (`Win32_DiskDrive`, `Win32_DiskPartition`, `Win32_LogicalDisk`) for structured disk reads
-- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, and shrink operations
+- **WMI** (`Win32_DiskDrive`, `Win32_DiskPartition`, `Win32_LogicalDisk`) for structured disk reads, plus the **Windows Storage API** (`MSFT_Disk`, `MSFT_Partition`) for exact disk sizes, real partition numbers and partitions `Win32_DiskPartition` hides
+- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, shrink, and wipe operations
 - **Raw Win32 I/O** (`CreateFile`, `ReadFile`, `WriteFile`, `DeviceIoControl`) for move and extend — diskpart has no move command and its extend path goes through VDS, which caches stale layouts after raw partition moves
 - **WPF + classic MVVM** with manual `ViewModelBase` and `RelayCommand` (no framework dependencies beyond `System.Management`)
 
 **Move partition safety model:**
-1. Volume is locked and dismounted before any writes
-2. All sectors are copied to the destination first (direction-aware to handle overlapping ranges)
-3. Only after a successful full copy is the partition table entry updated
-4. Cancellation during the copy phase leaves the source partition completely intact
+1. The move is checked against the disk's live partition table before anything is written: the destination must be aligned, unallocated space inside the usable area of the disk, and must not overlap the partition itself or any other partition (including hidden ones)
+2. The volume is locked and dismounted before any writes, including volumes without a drive letter
+3. All sectors are copied to the destination and flushed to the disk; only then is the partition table entry updated
+4. Cancellation or failure during the copy leaves the source partition completely intact, and the dialog says exactly what state the disk was left in
+5. Boot, system and Windows partitions can't be moved
 
 ---
 
 ## Safety Warning
 
-Disk operations are **irreversible**. Deleting, resizing, or moving partitions can result in permanent data loss. Always back up important data before performing any disk operations.
+Disk operations are **irreversible**. Deleting, resizing, moving partitions or wiping a disk can result in permanent data loss. Always back up important data before performing any disk operations.
 
-The application displays warnings for system and boot partitions and requires explicit confirmation before any destructive action.
+The application displays warnings for system and boot partitions, requires explicit confirmation before any destructive action, and refuses to wipe the disk Windows is running from or to move boot, system and Windows partitions.
 
 ---
 

@@ -17,8 +17,12 @@ public interface IPartitionMoveService
     /// <summary>
     /// Physically moves all sector data from <paramref name="sourceOffsetBytes"/> to
     /// <paramref name="destinationOffsetBytes"/>, then updates the partition table entry.
-    /// Safe to cancel during the copy phase — cancellation leaves the source partition intact.
+    /// The move is first checked against the live partition table; the destination must be
+    /// MiB-aligned unallocated space that doesn't overlap the source, so cancelling or failing
+    /// during the copy leaves the source partition intact.
     /// </summary>
+    /// <exception cref="PartitionOperationException">The move was refused or failed; the message says what state the disk is in.</exception>
+    /// <exception cref="OperationCanceledException">Cancelled during the copy; nothing changed.</exception>
     Task MovePartitionAsync(
         int diskNumber,
         string? driveLetter,
@@ -33,8 +37,9 @@ public interface IPartitionMoveService
     /// VDS entirely (VDS caches stale layouts after raw partition-table moves).
     /// Uses IOCTL_DISK_GROW_PARTITION to extend the partition entry (synchronous, goes directly
     /// to partmgr), then FSCTL_EXTEND_VOLUME to extend the NTFS filesystem.
-    /// If the partition has no drive letter the filesystem step is skipped.
+    /// Refuses (before changing anything) volumes that have no drive letter or aren't NTFS.
     /// </summary>
+    /// <exception cref="PartitionOperationException">The message says whether the partition was grown.</exception>
     Task ExtendPartitionRawAsync(
         int diskNumber,
         long partitionStartOffset,

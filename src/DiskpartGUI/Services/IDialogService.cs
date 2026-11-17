@@ -8,6 +8,7 @@ public interface IDialogService
     bool? ShowDeletePartitionDialog(DeletePartitionViewModel vm);
     bool? ShowResizePartitionDialog(ResizePartitionViewModel vm);
     bool? ShowMovePartitionDialog(MovePartitionViewModel vm);
+    bool? ShowWipeDiskDialog(WipeDiskViewModel vm);
     void ShowAboutDialog();
     void ShowError(string title, string message);
 }

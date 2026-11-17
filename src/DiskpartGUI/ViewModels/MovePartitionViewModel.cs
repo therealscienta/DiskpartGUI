@@ -31,6 +31,7 @@ public sealed class MovePartitionViewModel : ViewModelBase
     private bool _isMoving;
     private bool _isComplete;
     private bool _isCancelled;
+    private string? _errorMessage;
     private double _progressPercent;
     private string _progressStatus = string.Empty;
 
@@ -97,6 +98,26 @@ public sealed class MovePartitionViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Set when the move failed; says what state the disk was left in.</summary>
+    public string? ErrorMessage
+    {
+        get => _errorMessage;
+        private set
+        {
+            if (SetProperty(ref _errorMessage, value))
+            {
+                OnPropertyChanged(nameof(IsFailed));
+                OnPropertyChanged(nameof(CanMove));
+                OnPropertyChanged(nameof(ShowProgress));
+                OnPropertyChanged(nameof(ShowConfigure));
+                OnPropertyChanged(nameof(ShowClose));
+                OnPropertyChanged(nameof(StatusMessage));
+            }
+        }
+    }
+
+    public bool IsFailed => ErrorMessage is not null;
+
     public double ProgressPercent
     {
         get => _progressPercent;
@@ -111,14 +132,15 @@ public sealed class MovePartitionViewModel : ViewModelBase
 
     // ── Derived UI state ──────────────────────────────────────────────────────
 
-    public bool CanMove    => SelectedDestination is not null && !IsMoving && !IsComplete && !IsCancelled;
-    public bool ShowProgress  => IsMoving || IsComplete || IsCancelled;
+    public bool CanMove    => SelectedDestination is not null && !IsMoving && !IsComplete && !IsCancelled && !IsFailed;
+    public bool ShowProgress  => IsMoving || IsComplete || IsCancelled || IsFailed;
     public bool ShowConfigure => !ShowProgress;
     public bool CanCancel  => IsMoving && !IsComplete;
-    public bool ShowClose  => IsComplete || IsCancelled;
+    public bool ShowClose  => IsComplete || IsCancelled || IsFailed;
 
     public string StatusMessage => IsComplete   ? "Move completed successfully."
                                  : IsCancelled  ? "Move cancelled. The original partition is unchanged."
+                                 : IsFailed     ? ErrorMessage!
                                  : IsMoving     ? "Moving partition…"
                                  : string.Empty;
 
@@ -145,18 +167,24 @@ public sealed class MovePartitionViewModel : ViewModelBase
         _moveOperation       = moveOperation;
 
         AvailableDestinations = new ObservableCollection<MoveDestinationItem>(
-            availableRegions.Select(r =>
-            {
-                bool movingRight = r.StartOffsetBytes >= sourceOffsetBytes;
-                // For right moves: slide partition to the far end of the free space
-                // so the freed gap is contiguous with whatever is to the left.
-                // For left moves: slide to the far start of the free space.
-                long destOffset = movingRight
-                    ? r.StartOffsetBytes + r.SizeBytes - partitionSizeBytes
-                    : r.StartOffsetBytes;
-                string dirLabel = movingRight ? "→ right" : "← left";
-                return new MoveDestinationItem(r, dirLabel, destOffset);
-            }));
+            availableRegions
+                .Select(r =>
+                {
+                    bool movingRight = r.StartOffsetBytes >= sourceOffsetBytes;
+                    long regionEnd = r.StartOffsetBytes + r.SizeBytes;
+                    // For right moves: slide partition to the far end of the free space
+                    // so the freed gap is contiguous with whatever is to the left.
+                    // For left moves: slide to the far start of the free space.
+                    // Either way the start is MiB-aligned, as Windows expects (a misaligned
+                    // start makes every 4 KB write a read-modify-write on modern disks).
+                    long destOffset = movingRight
+                        ? DiskAlignment.AlignDown(regionEnd - partitionSizeBytes)
+                        : DiskAlignment.AlignUp(r.StartOffsetBytes);
+                    bool fits = destOffset >= r.StartOffsetBytes && destOffset + partitionSizeBytes <= regionEnd;
+                    string dirLabel = movingRight ? "→ right" : "← left";
+                    return fits ? new MoveDestinationItem(r, dirLabel, destOffset) : null;
+                })
+                .OfType<MoveDestinationItem>());
 
         MoveCommand   = new AsyncRelayCommand(ExecuteMoveAsync, () => CanMove);
         CancelCommand = new RelayCommand(ExecuteCancel, () => CanCancel);
@@ -188,6 +216,13 @@ public sealed class MovePartitionViewModel : ViewModelBase
         catch (OperationCanceledException)
         {
             IsCancelled = true;
+        }
+        catch (Exception ex)
+        {
+            // PartitionOperationException messages already say what state the disk is in.
+            ErrorMessage = ex is Services.PartitionOperationException
+                ? ex.Message
+                : $"The move failed unexpectedly: {ex.Message}";
         }
         finally
         {

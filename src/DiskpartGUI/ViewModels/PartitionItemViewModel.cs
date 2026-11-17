@@ -9,6 +9,8 @@ public sealed class PartitionItemViewModel : ViewModelBase, IDiskBarItem
     public LogicalDiskInfo? LogicalDisk { get; }
 
     public int PartitionIndex => Partition.PartitionIndex;
+    /// <summary>Real partition number used by diskpart; null if unresolved.</summary>
+    public int? PartitionNumber => Partition.PartitionNumber;
     public long SizeBytes => Partition.SizeBytes;
     public long StartingOffset => Partition.StartingOffset;
     public string Type => Partition.Type;

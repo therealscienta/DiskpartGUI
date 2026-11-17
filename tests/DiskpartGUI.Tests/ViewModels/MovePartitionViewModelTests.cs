@@ -250,4 +250,75 @@ public sealed class MovePartitionViewModelTests
             sourceOffsetBytes: 30L * 1024 * 1024 * 1024);
         Assert.Contains("left", vm.AvailableDestinations[0].DirectionLabel);
     }
+
+    // ── Alignment ─────────────────────────────────────────────────────────────
+
+    private const long MiB = DiskAlignment.MiB;
+
+    [Fact]
+    public void RightMove_ToUnalignedRegionEnd_IsRoundedDownToMiB()
+    {
+        // Region ends at a cylinder-style boundary (512 bytes past a MiB multiple).
+        var region = new FreeSpaceRegion(10 * 1024 * MiB, 5 * 1024 * MiB + 512);
+        var vm = new MovePartitionViewModel("desc", [region], (_, _, _) => Task.CompletedTask,
+            sourceOffsetBytes: MiB, partitionSizeBytes: 1024 * MiB);
+
+        var dest = vm.AvailableDestinations[0].DestinationOffsetBytes;
+        Assert.Equal(0, dest % MiB);
+        Assert.Equal(14 * 1024 * MiB, dest);
+    }
+
+    [Fact]
+    public void LeftMove_FromUnalignedRegionStart_IsRoundedUpToMiB()
+    {
+        var region = new FreeSpaceRegion(MiB + 4096, 4 * 1024 * MiB);
+        var vm = new MovePartitionViewModel("desc", [region], (_, _, _) => Task.CompletedTask,
+            sourceOffsetBytes: 50L * 1024 * MiB, partitionSizeBytes: 1024 * MiB);
+
+        Assert.Equal(2 * MiB, vm.AvailableDestinations[0].DestinationOffsetBytes);
+    }
+
+    [Fact]
+    public void Region_ThatNoLongerFitsAfterAlignment_IsNotOffered()
+    {
+        // Exactly partition-sized, but starting 4 KiB past a MiB boundary.
+        var region = new FreeSpaceRegion(MiB + 4096, 1024 * MiB);
+        var vm = new MovePartitionViewModel("desc", [region], (_, _, _) => Task.CompletedTask,
+            sourceOffsetBytes: 50L * 1024 * MiB, partitionSizeBytes: 1024 * MiB);
+
+        Assert.Empty(vm.AvailableDestinations);
+    }
+
+    // ── Failure ───────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task MoveCommand_WhenServiceFails_ShowsItsMessageAndAllowsClose()
+    {
+        const string message = "All data was copied, but the partition table could not be updated (boom). " +
+                               "The partition still points to its original location, whose data is unchanged.";
+        var vm = MakeVm(moveOp: (_, _, _) => Task.FromException(new DiskpartGUI.Services.PartitionOperationException(message)));
+        vm.SelectedDestination = vm.AvailableDestinations[0];
+
+        await vm.MoveCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsFailed);
+        Assert.Equal(message, vm.ErrorMessage);
+        Assert.Equal(message, vm.StatusMessage);
+        Assert.False(vm.IsMoving);
+        Assert.False(vm.IsComplete);
+        Assert.True(vm.ShowClose);
+        Assert.False(vm.CanMove);
+    }
+
+    [Fact]
+    public async Task MoveCommand_WhenUnexpectedExceptionThrown_DoesNotEscape()
+    {
+        var vm = MakeVm(moveOp: (_, _, _) => Task.FromException(new InvalidOperationException("unexpected")));
+        vm.SelectedDestination = vm.AvailableDestinations[0];
+
+        await vm.MoveCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsFailed);
+        Assert.Contains("unexpected", vm.ErrorMessage);
+    }
 }

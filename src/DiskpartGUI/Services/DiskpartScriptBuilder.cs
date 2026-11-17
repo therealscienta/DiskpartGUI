@@ -18,12 +18,14 @@ public sealed class DiskpartScriptBuilder : IScriptBuilder
         return this;
     }
 
-    public IScriptBuilder CreatePartitionPrimary(long? sizeMb = null)
+    /// <param name="sizeMb">Size in MB; null fills the free region the partition starts in.</param>
+    /// <param name="offsetKb">Start offset in KB; null lets diskpart pick the first region that fits.</param>
+    public IScriptBuilder CreatePartitionPrimary(long? sizeMb = null, long? offsetKb = null)
     {
-        if (sizeMb.HasValue)
-            _sb.AppendLine($"create partition primary size={sizeMb.Value}");
-        else
-            _sb.AppendLine("create partition primary");
+        var line = new StringBuilder("create partition primary");
+        if (sizeMb.HasValue) line.Append($" size={sizeMb.Value}");
+        if (offsetKb.HasValue) line.Append($" offset={offsetKb.Value}");
+        _sb.AppendLine(line.ToString());
         return this;
     }
 
@@ -69,6 +71,13 @@ public sealed class DiskpartScriptBuilder : IScriptBuilder
     public IScriptBuilder Rescan()
     {
         _sb.AppendLine("rescan");
+        return this;
+    }
+
+    /// <summary>Removes every partition and the partition table from the selected disk.</summary>
+    public IScriptBuilder Clean()
+    {
+        _sb.AppendLine("clean");
         return this;
     }
 

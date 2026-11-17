@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -28,6 +29,15 @@ internal static class NativeDisk
     // Extends the NTFS filesystem to a new total sector count
     // CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, 60, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
     internal const uint FSCTL_EXTEND_VOLUME            = 0x000900F0;
+    // Byte length of a disk or volume
+    // CTL_CODE(IOCTL_DISK_BASE=7, 0x17, METHOD_BUFFERED=0, FILE_READ_ACCESS=1)
+    internal const uint IOCTL_DISK_GET_LENGTH_INFO     = 0x0007405C;
+    // Which disk(s) and byte range(s) a volume occupies
+    // CTL_CODE(IOCTL_VOLUME_BASE='V'=0x56, 0, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
+    internal const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
+
+    internal const uint PARTITION_STYLE_MBR = 0;
+    internal const uint PARTITION_STYLE_GPT = 1;
 
     // ── Access / share / creation flags ──────────────────────────────────────
     private const uint GENERIC_READ       = 0x80000000;
@@ -101,6 +111,20 @@ internal static class NativeDisk
         SafeFileHandle hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
         out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FlushFileBuffers(SafeFileHandle hFile);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "FindFirstVolumeW")]
+    private static extern IntPtr FindFirstVolume(char[] lpszVolumeName, uint cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "FindNextVolumeW")]
+    private static extern bool FindNextVolume(IntPtr hFindVolume, char[] lpszVolumeName, uint cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindVolumeClose(IntPtr hFindVolume);
+
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
     // ── Public helpers ────────────────────────────────────────────────────────
 
     /// <summary>Opens \\.\PhysicalDriveN for raw sector access.</summary>
@@ -136,6 +160,93 @@ internal static class NativeDisk
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 $"Cannot open volume {letter}.");
         return handle;
+    }
+
+    /// <summary>Opens a volume by device path (e.g. <c>\\?\Volume{guid}</c>, no trailing slash) for lock/dismount.</summary>
+    internal static SafeFileHandle OpenVolumeDevice(string devicePath)
+    {
+        var handle = CreateFile(
+            devicePath,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+
+        if (handle.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Cannot open volume {devicePath}.");
+        return handle;
+    }
+
+    /// <summary>
+    /// Finds the mounted volume that lives in the partition starting at
+    /// <paramref name="partitionOffset"/> on disk <paramref name="diskNumber"/>, whether or not
+    /// it has a drive letter. Returns its device path (<c>\\?\Volume{guid}</c>) or null if no
+    /// volume sits there (e.g. an MSR or unrecognised partition).
+    /// </summary>
+    internal static string? FindVolumeDevicePath(int diskNumber, long partitionOffset)
+    {
+        var name = new char[260];
+        var find = FindFirstVolume(name, (uint)name.Length);
+        if (find == INVALID_HANDLE_VALUE) return null;
+        try
+        {
+            do
+            {
+                // FindFirstVolume returns "\\?\Volume{guid}\"; the device itself has no trailing slash.
+                var end = Array.IndexOf(name, '\0');
+                var volumeName = new string(name, 0, end < 0 ? name.Length : end);
+                var devicePath = volumeName.TrimEnd('\\');
+                if (VolumeStartsAt(devicePath, diskNumber, partitionOffset))
+                    return devicePath;
+            }
+            while (FindNextVolume(find, name, (uint)name.Length));
+        }
+        finally
+        {
+            FindVolumeClose(find);
+        }
+        return null;
+    }
+
+    private static bool VolumeStartsAt(string devicePath, int diskNumber, long partitionOffset)
+    {
+        // Access 0 is enough for IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS (FILE_ANY_ACCESS).
+        using var handle = CreateFile(devicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (handle.IsInvalid) return false;
+
+        // VOLUME_DISK_EXTENTS: [0] NumberOfDiskExtents (DWORD) + 4 padding,
+        // then DISK_EXTENT[]: { DWORD DiskNumber; 4 padding; LARGE_INTEGER StartingOffset; LARGE_INTEGER ExtentLength } = 24 bytes
+        var buf = new byte[8 + 24 * 8];
+        if (!DeviceIoControl(handle, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                IntPtr.Zero, 0, buf, (uint)buf.Length, out _, IntPtr.Zero))
+            return false;
+
+        int count = (int)BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0));
+        for (int i = 0; i < count && 8 + 24 * (i + 1) <= buf.Length; i++)
+        {
+            int pos = 8 + 24 * i;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos)) == (uint)diskNumber &&
+                BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(pos + 8)) == partitionOffset)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Byte length of a disk or volume (IOCTL_DISK_GET_LENGTH_INFO).</summary>
+    internal static long GetLength(SafeFileHandle handle)
+    {
+        var buf = new byte[8];
+        if (!DeviceIoControl(handle, IOCTL_DISK_GET_LENGTH_INFO,
+                IntPtr.Zero, 0, buf, (uint)buf.Length, out _, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "IOCTL_DISK_GET_LENGTH_INFO failed.");
+        return BinaryPrimitives.ReadInt64LittleEndian(buf);
+    }
+
+    /// <summary>Forces data still in the OS or drive write cache onto the disk.</summary>
+    internal static void Flush(SafeFileHandle handle)
+    {
+        if (!FlushFileBuffers(handle))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "FlushFileBuffers failed.");
     }
 
     /// <summary>Sends a no-input/no-output IOCTL (e.g. lock/dismount/unlock).</summary>
@@ -195,8 +306,26 @@ internal static class NativeDisk
 
     // ── Layout buffer helpers (BinaryPrimitives, no unsafe) ──────────────────
 
+    internal static uint GetPartitionStyle(byte[] layout)
+        => BinaryPrimitives.ReadUInt32LittleEndian(layout.AsSpan(0));
+
     internal static int GetPartitionCount(byte[] layout)
         => (int)BinaryPrimitives.ReadUInt32LittleEndian(layout.AsSpan(4));
+
+    /// <summary>
+    /// GPT only: the byte range partitions may occupy (between the primary and backup GPT).
+    /// DRIVE_LAYOUT_INFORMATION_GPT at [8]: GUID DiskId (16), LARGE_INTEGER StartingUsableOffset
+    /// at [24], LARGE_INTEGER UsableLength at [32], ULONG MaxPartitionCount at [40].
+    /// </summary>
+    internal static (long Start, long Length) GetGptUsableRange(byte[] layout)
+        => (BinaryPrimitives.ReadInt64LittleEndian(layout.AsSpan(24)),
+            BinaryPrimitives.ReadInt64LittleEndian(layout.AsSpan(32)));
+
+    internal static long ReadEntryLength(byte[] layout, int entryIndex)
+    {
+        int pos = DriveLayoutHeaderSize + entryIndex * PartitionEntrySize + EntryLengthOffset;
+        return BinaryPrimitives.ReadInt64LittleEndian(layout.AsSpan(pos));
+    }
 
     internal static long ReadEntryStartingOffset(byte[] layout, int entryIndex)
     {
@@ -242,23 +371,37 @@ internal static class NativeDisk
     }
 
     /// <summary>
-    /// Extends the NTFS filesystem on the volume to incorporate <paramref name="growByBytes"/>
-    /// additional bytes, using the current sector count from FSCTL_GET_NTFS_VOLUME_DATA.
+    /// Reads NumberSectors and BytesPerSector from FSCTL_GET_NTFS_VOLUME_DATA.
+    /// Fails (ERROR_INVALID_FUNCTION) on anything that isn't NTFS.
     /// </summary>
-    internal static void ExtendVolume(SafeFileHandle volumeHandle, long growByBytes)
+    internal static (long NumberSectors, long BytesPerSector) GetNtfsVolumeData(SafeFileHandle volumeHandle)
     {
-        // NTFS_VOLUME_DATA_BUFFER: [8..15] = NumberSectors (LARGE_INTEGER, 512-byte sectors)
-        var ntfsData = new byte[120];
-        if (!DeviceIoControl(volumeHandle, FSCTL_GET_NTFS_VOLUME_DATA,
-                IntPtr.Zero, 0, ntfsData, (uint)ntfsData.Length, out _, IntPtr.Zero))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "FSCTL_GET_NTFS_VOLUME_DATA failed.");
-
         // NTFS_VOLUME_DATA_BUFFER layout:
         //   [8]  NumberSectors  : LONGLONG  — sector count using the volume's own sector size
         //   [40] BytesPerSector : DWORD     — NTFS logical sector size (512 on most disks, 4096 on 4Kn)
-        long currentSectors = BinaryPrimitives.ReadInt64LittleEndian(ntfsData.AsSpan(8));
-        long bytesPerSector  = BinaryPrimitives.ReadUInt32LittleEndian(ntfsData.AsSpan(40));
-        long newSectors = currentSectors + growByBytes / bytesPerSector;
+        var ntfsData = new byte[120];
+        if (!DeviceIoControl(volumeHandle, FSCTL_GET_NTFS_VOLUME_DATA,
+                IntPtr.Zero, 0, ntfsData, (uint)ntfsData.Length, out _, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "This volume is not NTFS (FSCTL_GET_NTFS_VOLUME_DATA failed).");
+
+        return (BinaryPrimitives.ReadInt64LittleEndian(ntfsData.AsSpan(8)),
+                BinaryPrimitives.ReadUInt32LittleEndian(ntfsData.AsSpan(40)));
+    }
+
+    /// <summary>
+    /// Extends the NTFS filesystem to fill its (already grown) partition. The target size comes
+    /// from the volume's current length rather than "old size + delta", so it is also correct
+    /// when retrying after an earlier attempt failed. NTFS keeps its backup boot sector in the
+    /// partition's last sector, so the filesystem spans every sector but that one.
+    /// </summary>
+    /// <exception cref="IOException">The volume doesn't report the larger size yet (PnP still settling).</exception>
+    internal static void ExtendNtfsToFillVolume(SafeFileHandle volumeHandle)
+    {
+        var (currentSectors, bytesPerSector) = GetNtfsVolumeData(volumeHandle);
+        long newSectors = GetLength(volumeHandle) / bytesPerSector - 1;
+
+        if (newSectors <= currentSectors)
+            throw new IOException("The volume does not report the larger partition size yet.");
 
         var buf = new byte[8];
         BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(0), newSectors);
