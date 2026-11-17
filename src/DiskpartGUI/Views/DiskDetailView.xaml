@@ -36,7 +36,10 @@
         </Border>
 
         <!-- Partition DataGrid -->
+        <!-- IsReadOnly: every column binds to a get-only property, so entering edit mode
+             (double-click / F2) would throw. -->
         <DataGrid Grid.Row="2"
+                  IsReadOnly="True"
                   ItemsSource="{Binding DisplayItems}"
                   SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
                   Margin="0">
@@ -60,7 +63,7 @@
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
-                <DataGridTextColumn Header="#" Binding="{Binding PartitionIndex}" Width="40"/>
+                <DataGridTextColumn Header="#" Binding="{Binding PartitionNumber}" Width="40"/>
                 <DataGridTextColumn Header="Drive" Binding="{Binding DriveLetter}" Width="60"/>
                 <DataGridTextColumn Header="Label" Binding="{Binding VolumeName}" Width="120"/>
                 <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="160"/>

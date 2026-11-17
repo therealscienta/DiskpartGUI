@@ -20,7 +20,7 @@ public sealed class FreeSpaceItemViewModel : ViewModelBase, IDiskBarItem
     }
 
     // Null/default values for DataGrid column compatibility
-    public int? PartitionIndex => null;
+    public int? PartitionNumber => null;
     public string? DriveLetter => null;
     public string? VolumeName => null;
     public string? FileSystem => null;

@@ -18,6 +18,7 @@ A modern Windows desktop application providing a graphical interface for the Win
 - **Delete partition** — with protection for system/boot partitions and a force-override option
 - **Resize partition** — shrink or extend with a real-time shrink limit from `shrink querymax` (prevents silent partial shrinks caused by unmovable files like `pagefile.sys` or VSS snapshots); extend uses raw Win32 IOCTLs to bypass the VDS cache
 - **Move partition** — physically relocates a partition's data using raw sector I/O; safe cancellation leaves the source partition intact if aborted mid-copy
+- **Wipe disk** — removes every partition on a disk (`diskpart clean`), leaving it empty and uninitialized; lists what will be erased, requires explicit confirmation, and refuses the disk Windows is running from
 - **About dialog** — version, description, and GitHub link
 - **Portable** — runs as a single `.exe` with no installation required
 
@@ -104,15 +105,16 @@ src/DiskpartGUI/
 
 **Technology choices:**
 - **WMI** (`Win32_DiskDrive`, `Win32_DiskPartition`, `Win32_LogicalDisk`) for structured disk reads
-- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, and shrink operations
+- **diskpart.exe** via temporary script files (`diskpart /s <file>`) for add, delete, shrink, and wipe operations
 - **Raw Win32 I/O** (`CreateFile`, `ReadFile`, `WriteFile`, `DeviceIoControl`) for move and extend — diskpart has no move command and its extend path goes through VDS, which caches stale layouts after raw partition moves
 - **WPF + classic MVVM** with manual `ViewModelBase` and `RelayCommand` (no framework dependencies beyond `System.Management`)
 
 **Move partition safety model:**
-1. Volume is locked and dismounted before any writes
-2. All sectors are copied to the destination first (direction-aware to handle overlapping ranges)
-3. Only after a successful full copy is the partition table entry updated
-4. Cancellation during the copy phase leaves the source partition completely intact
+1. The move is checked against the disk's live partition table before anything is written: the destination must be aligned, unallocated space inside the usable area of the disk, and must not overlap the partition itself or any other partition (including hidden ones)
+2. The volume is locked and dismounted before any writes, including volumes without a drive letter
+3. All sectors are copied to the destination and flushed to the disk; only then is the partition table entry updated
+4. Cancellation or failure during the copy leaves the source partition completely intact, and the dialog says exactly what state the disk was left in
+5. Boot, system and Windows partitions can't be moved
 
 ---
 

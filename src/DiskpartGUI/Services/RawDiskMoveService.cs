@@ -1,12 +1,26 @@
+using System.ComponentModel;
+using System.IO;
 using System.Diagnostics;
 using DiskpartGUI.Interop;
 using DiskpartGUI.Models;
+using Microsoft.Win32.SafeHandles;
 
 namespace DiskpartGUI.Services;
 
+/// <summary>
+/// A move or extend that failed. <see cref="Exception.Message"/> is written for the user and says
+/// what state the disk was left in.
+/// </summary>
+public sealed class PartitionOperationException(string message, Exception? inner = null)
+    : Exception(message, inner);
+
 public sealed class RawDiskMoveService : IPartitionMoveService
 {
-    private const int ChunkSize = 4 * 1024 * 1024; // 4 MB
+    // Large chunks cut the number of seeks between source and destination on spinning disks.
+    private const int ChunkSize = 32 * 1024 * 1024; // 32 MB
+
+    // Progress<T> posts every report to the UI thread; cap it so fast disks don't flood it.
+    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(200);
 
     // ── Free space calculation ────────────────────────────────────────────────
 
@@ -25,18 +39,17 @@ public sealed class RawDiskMoveService : IPartitionMoveService
 
         var regions = new List<FreeSpaceRegion>();
 
-        // Gap before the first partition (typically too small / reserved, but include if big enough)
-        long cursor = 0L;
+        // Never offer the first MiB (MBR / GPT header and entries) or the backup GPT at the end.
+        long cursor = DiskAlignment.LeadingReserveBytes;
         foreach (var p in sorted)
         {
-            long gapStart = cursor;
-            long gapEnd   = p.StartingOffset;
-            AddIfLargeEnough(regions, gapStart, gapEnd - gapStart, partitionSizeBytes);
-            cursor = p.StartingOffset + p.SizeBytes;
+            AddIfLargeEnough(regions, cursor, p.StartingOffset - cursor, partitionSizeBytes);
+            cursor = Math.Max(cursor, p.StartingOffset + p.SizeBytes);
         }
 
         // Gap after the last partition
-        AddIfLargeEnough(regions, cursor, disk.SizeBytes - cursor, partitionSizeBytes);
+        long usableEnd = DiskAlignment.UsableEnd(disk.SizeBytes);
+        AddIfLargeEnough(regions, cursor, usableEnd - cursor, partitionSizeBytes);
 
         return regions;
     }
@@ -44,7 +57,7 @@ public sealed class RawDiskMoveService : IPartitionMoveService
     private static void AddIfLargeEnough(
         List<FreeSpaceRegion> list, long start, long size, long minSize)
     {
-        if (size >= minSize)
+        if (size > 0 && size >= minSize)
             list.Add(new FreeSpaceRegion(start, size));
     }
 
@@ -58,49 +71,66 @@ public sealed class RawDiskMoveService : IPartitionMoveService
     private static void ExecuteExtend(
         int diskNumber, long partitionStartOffset, long growByBytes, string? driveLetter)
     {
-        // Grow the partition table entry directly via partmgr (synchronous, bypasses VDS).
-        using var diskHandle = NativeDisk.OpenDisk(diskNumber, readWrite: true);
-        var layout = NativeDisk.GetDriveLayout(diskHandle);
-        int count = NativeDisk.GetPartitionCount(layout);
-
-        uint partitionNumber = 0;
-        for (int i = 0; i < count; i++)
+        // Check the filesystem *before* touching the partition table: growing a partition whose
+        // filesystem can't follow just strands the new space.
+        if (driveLetter is null)
+            throw new PartitionOperationException(
+                "Extend needs the volume to have a drive letter. Nothing was changed.");
+        try
         {
-            if (NativeDisk.ReadEntryStartingOffset(layout, i) == partitionStartOffset)
-            {
-                partitionNumber = NativeDisk.ReadEntryPartitionNumber(layout, i);
-                break;
-            }
+            using var volume = NativeDisk.OpenVolume(driveLetter);
+            NativeDisk.GetNtfsVolumeData(volume);
+        }
+        catch (Win32Exception ex)
+        {
+            throw new PartitionOperationException(
+                $"Only NTFS volumes can be extended ({ex.Message}). Nothing was changed.", ex);
         }
 
-        if (partitionNumber == 0)
-            throw new InvalidOperationException(
-                $"Partition at offset {partitionStartOffset} not found in disk layout.");
+        // Grow the partition table entry directly via partmgr (synchronous, bypasses VDS).
+        using (var diskHandle = NativeDisk.OpenDisk(diskNumber, readWrite: true))
+        {
+            var layout = NativeDisk.GetDriveLayout(diskHandle);
+            uint partitionNumber = FindEntry(layout, partitionStartOffset) is int i
+                ? NativeDisk.ReadEntryPartitionNumber(layout, i)
+                : 0;
 
-        NativeDisk.GrowPartition(diskHandle, partitionNumber, growByBytes);
+            if (partitionNumber == 0)
+                throw new PartitionOperationException(
+                    "The partition was not found in the disk's partition table. Refresh and try again. Nothing was changed.");
+
+            NativeDisk.GrowPartition(diskHandle, partitionNumber, growByBytes);
+        }
 
         // Extend the NTFS filesystem to fill the newly grown partition.
-        // GrowPartition triggers an async PnP re-enumeration, so the volume may be briefly
-        // inaccessible immediately after. Retry with back-off to let it settle.
-        if (driveLetter is not null)
-            ExtendNtfsWithRetry(driveLetter, growByBytes);
+        try
+        {
+            ExtendNtfsWithRetry(driveLetter);
+        }
+        catch (Exception ex)
+        {
+            throw new PartitionOperationException(
+                "The partition was grown, but its NTFS file system could not be extended to fill it " +
+                $"({ex.Message}). To finish, run diskpart, select this volume, and run \"extend filesystem\".", ex);
+        }
     }
 
-    private static void ExtendNtfsWithRetry(string driveLetter, long growByBytes)
+    private static void ExtendNtfsWithRetry(string driveLetter)
     {
-        // Up to 5 attempts (total wait ≤ ~3 s) to allow PnP re-enumeration to finish.
-        int[] delaysMs = [300, 600, 800, 800, 800];
+        // GrowPartition triggers an async PnP re-enumeration, so the volume may be briefly
+        // inaccessible or still report its old size. Try at once, then back off (~3.5 s total).
+        int[] delaysMs = [0, 300, 600, 800, 800, 1000];
         Exception? last = null;
-        for (int i = 0; i < delaysMs.Length; i++)
+        foreach (var delay in delaysMs)
         {
-            System.Threading.Thread.Sleep(delaysMs[i]);
+            if (delay > 0) Thread.Sleep(delay);
             try
             {
                 using var volumeHandle = NativeDisk.OpenVolume(driveLetter);
-                NativeDisk.ExtendVolume(volumeHandle, growByBytes);
+                NativeDisk.ExtendNtfsToFillVolume(volumeHandle);
                 return;
             }
-            catch (System.ComponentModel.Win32Exception ex) { last = ex; }
+            catch (Exception ex) when (ex is Win32Exception or IOException) { last = ex; }
         }
         throw last!;
     }
@@ -131,36 +161,85 @@ public sealed class RawDiskMoveService : IPartitionMoveService
         IProgress<MoveProgress> progress,
         CancellationToken ct)
     {
-        // 1. Lock + dismount the volume (if it has a drive letter)
-        var volumeHandle = driveLetter is not null
-            ? NativeDisk.OpenVolume(driveLetter)
-            : null;
+        const string Unchanged = "Nothing was changed.";
 
+        // 1. Check the move against the disk's *live* partition table before writing anything.
+        //    The UI's free-space list comes from WMI, which can be stale or incomplete.
+        SafeFileHandle? diskHandle = null;
+        string? error;
         try
         {
-            if (volumeHandle is not null)
+            diskHandle = NativeDisk.OpenDisk(diskNumber, readWrite: true);
+            error = ValidateMove(
+                NativeDisk.GetDriveLayout(diskHandle), NativeDisk.GetLength(diskHandle),
+                sourceOffsetBytes, destinationOffsetBytes, sizeBytes);
+        }
+        catch (Win32Exception ex)
+        {
+            diskHandle?.Dispose();
+            throw new PartitionOperationException($"Could not read the disk's partition table ({ex.Message}). {Unchanged}", ex);
+        }
+        using var _ = diskHandle;
+        if (error is not null)
+            throw new PartitionOperationException($"{error} {Unchanged}");
+
+        // 2. Lock + dismount the volume in this partition, found by its disk extents so that
+        //    volumes without a drive letter (or mounted in a folder) are locked too.
+        SafeFileHandle? volumeHandle = null;
+        try
+        {
+            var volumePath = NativeDisk.FindVolumeDevicePath(diskNumber, sourceOffsetBytes);
+            try
             {
-                NativeDisk.IoctlSimple(volumeHandle, NativeDisk.FSCTL_LOCK_VOLUME,
-                    "Cannot lock volume. Close any open files on this partition and retry.");
-                NativeDisk.IoctlSimple(volumeHandle, NativeDisk.FSCTL_DISMOUNT_VOLUME,
-                    "Cannot dismount volume.");
+                volumeHandle = volumePath is not null ? NativeDisk.OpenVolumeDevice(volumePath)
+                             : driveLetter is not null ? NativeDisk.OpenVolume(driveLetter)
+                             : null;
+                if (volumeHandle is not null)
+                {
+                    NativeDisk.IoctlSimple(volumeHandle, NativeDisk.FSCTL_LOCK_VOLUME,
+                        "Cannot lock the volume. Close any programs or windows using this partition and retry.");
+                    NativeDisk.IoctlSimple(volumeHandle, NativeDisk.FSCTL_DISMOUNT_VOLUME,
+                        "Cannot dismount the volume.");
+                }
+            }
+            catch (Win32Exception ex)
+            {
+                throw new PartitionOperationException($"{ex.Message} {Unchanged}", ex);
             }
 
-            // 2. Open the physical disk
-            using var diskHandle = NativeDisk.OpenDisk(diskNumber, readWrite: true);
+            // 3. Copy all sectors. The destination never overlaps the source (checked above), so
+            //    the source stays intact if this fails or is cancelled.
+            try
+            {
+                CopySectors(diskHandle, sourceOffsetBytes, destinationOffsetBytes, sizeBytes, progress, ct);
 
-            // 3. Copy all sectors (cancellable — source is still intact if cancelled)
-            CopySectors(diskHandle, sourceOffsetBytes, destinationOffsetBytes, sizeBytes, progress, ct);
+                // Make sure the copy is on the disk, not in a write cache, before the partition
+                // table is switched over to it.
+                NativeDisk.Flush(diskHandle);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                throw new PartitionOperationException(
+                    $"Copying failed ({ex.Message}). The partition was not moved and its data is unchanged; " +
+                    "only unallocated space was written to.", ex);
+            }
 
-            // 4. Safe cancellation point — if ct was cancelled, CopySectors already threw.
-            //    Reaching here means the copy completed successfully.
-
-            // 5. Update partition table entry (cannot be safely cancelled — very fast)
-            UpdatePartitionTableEntry(diskHandle, sourceOffsetBytes, destinationOffsetBytes);
+            // 4. Point the partition table entry at the copy.
+            try
+            {
+                UpdatePartitionTableEntry(diskHandle, sourceOffsetBytes, destinationOffsetBytes);
+            }
+            catch (Exception ex)
+            {
+                throw new PartitionOperationException(
+                    $"All data was copied, but the partition table could not be updated ({ex.Message}). " +
+                    "The partition still points to its original location, whose data is unchanged.", ex);
+            }
         }
         finally
         {
-            // 6. Unlock the volume regardless of outcome
+            // 5. Unlock the volume regardless of outcome
             if (volumeHandle is not null)
             {
                 try { NativeDisk.IoctlSimple(volumeHandle, NativeDisk.FSCTL_UNLOCK_VOLUME, "Unlock"); }
@@ -170,28 +249,116 @@ public sealed class RawDiskMoveService : IPartitionMoveService
         }
     }
 
+    /// <summary>
+    /// Checks a move against the disk's live partition table. Returns null if it is safe, or a
+    /// message saying why not. Guarantees, when null: the source partition is exactly where the
+    /// UI thinks it is, the destination is MiB-aligned, lies inside the area partitions may
+    /// use, and overlaps neither the source nor any other partition (so a failed or cancelled
+    /// copy only ever writes to unallocated space).
+    /// </summary>
+    internal static string? ValidateMove(
+        byte[] layout, long diskLengthBytes, long sourceOffset, long destinationOffset, long sizeBytes)
+    {
+        const string Refresh = "The partition list is out of date; click Refresh and try again.";
+
+        if (sizeBytes <= 0)
+            return "The partition size is invalid.";
+        if (destinationOffset == sourceOffset)
+            return "The destination is the partition's current position.";
+        if (destinationOffset % DiskAlignment.MiB != 0)
+            return "The destination is not aligned to 1 MiB.";
+
+        var style = NativeDisk.GetPartitionStyle(layout);
+        long usableStart, usableEnd;
+        if (style == NativeDisk.PARTITION_STYLE_GPT)
+        {
+            var (start, length) = NativeDisk.GetGptUsableRange(layout);
+            (usableStart, usableEnd) = (start, start + length);
+        }
+        else if (style == NativeDisk.PARTITION_STYLE_MBR)
+        {
+            (usableStart, usableEnd) = (DiskAlignment.LeadingReserveBytes, diskLengthBytes);
+        }
+        else
+        {
+            return "The disk has no partition table.";
+        }
+
+        long destinationEnd = destinationOffset + sizeBytes;
+        if (destinationOffset < usableStart || destinationEnd > usableEnd)
+            return "The destination is outside the area of the disk partitions may use.";
+
+        if (FindEntry(layout, sourceOffset) is not int sourceIndex ||
+            NativeDisk.ReadEntryLength(layout, sourceIndex) != sizeBytes)
+            return Refresh;
+
+        if (Overlaps(destinationOffset, destinationEnd, sourceOffset, sourceOffset + sizeBytes))
+            return "The destination overlaps the partition itself.";
+
+        int count = NativeDisk.GetPartitionCount(layout);
+        for (int i = 0; i < count; i++)
+        {
+            if (i == sourceIndex) continue;
+            long start = NativeDisk.ReadEntryStartingOffset(layout, i);
+            long length = NativeDisk.ReadEntryLength(layout, i);
+            if (length <= 0) continue; // unused MBR slot
+
+            // Includes MBR extended containers, so logical partitions can't be moved out of
+            // (or into) one and corrupt the EBR chain.
+            if (Overlaps(destinationOffset, destinationEnd, start, start + length))
+                return $"The destination overlaps another partition (at {start / DiskAlignment.MiB:N0} MiB). {Refresh}";
+            if (Overlaps(sourceOffset, sourceOffset + sizeBytes, start, start + length))
+                return "Partitions inside an MBR extended partition can't be moved.";
+        }
+
+        return null;
+    }
+
+    private static bool Overlaps(long aStart, long aEnd, long bStart, long bEnd)
+        => aStart < bEnd && bStart < aEnd;
+
+    private static int? FindEntry(byte[] layout, long startingOffset)
+    {
+        int count = NativeDisk.GetPartitionCount(layout);
+        for (int i = 0; i < count; i++)
+        {
+            if (NativeDisk.ReadEntryLength(layout, i) > 0 &&
+                NativeDisk.ReadEntryStartingOffset(layout, i) == startingOffset)
+                return i;
+        }
+        return null;
+    }
+
     // ── Sector copy ───────────────────────────────────────────────────────────
 
     private static void CopySectors(
-        Microsoft.Win32.SafeHandles.SafeFileHandle disk,
+        SafeFileHandle disk,
         long srcOffset, long dstOffset, long totalBytes,
         IProgress<MoveProgress> progress, CancellationToken ct)
     {
-        var buf = new byte[ChunkSize];
+        var buf = new byte[(int)Math.Min(ChunkSize, totalBytes)];
         long bytesCopied = 0;
         var sw = Stopwatch.StartNew();
+        var lastReport = TimeSpan.Zero;
+
+        void Report()
+        {
+            if (bytesCopied < totalBytes && sw.Elapsed - lastReport < ProgressInterval) return;
+            lastReport = sw.Elapsed;
+            ReportProgress(progress, bytesCopied, totalBytes, sw);
+        }
 
         if (dstOffset < srcOffset)
         {
             // Moving LEFT — copy forward (low to high addresses)
-            for (long pos = 0; pos < totalBytes; pos += ChunkSize)
+            for (long pos = 0; pos < totalBytes; pos += buf.Length)
             {
                 ct.ThrowIfCancellationRequested();
-                var count = (int)Math.Min(ChunkSize, totalBytes - pos);
+                var count = (int)Math.Min(buf.Length, totalBytes - pos);
                 ReadChunk(disk, srcOffset + pos, buf, count);
                 WriteChunk(disk, dstOffset + pos, buf, count);
                 bytesCopied += count;
-                ReportProgress(progress, bytesCopied, totalBytes, sw);
+                Report();
             }
         }
         else
@@ -201,25 +368,23 @@ public sealed class RawDiskMoveService : IPartitionMoveService
             while (remaining > 0)
             {
                 ct.ThrowIfCancellationRequested();
-                var count = (int)Math.Min(ChunkSize, remaining);
+                var count = (int)Math.Min(buf.Length, remaining);
                 remaining -= count;
                 ReadChunk(disk, srcOffset + remaining, buf, count);
                 WriteChunk(disk, dstOffset + remaining, buf, count);
                 bytesCopied += count;
-                ReportProgress(progress, bytesCopied, totalBytes, sw);
+                Report();
             }
         }
     }
 
-    private static void ReadChunk(
-        Microsoft.Win32.SafeHandles.SafeFileHandle disk, long offset, byte[] buf, int count)
+    private static void ReadChunk(SafeFileHandle disk, long offset, byte[] buf, int count)
     {
         NativeDisk.SeekTo(disk, offset);
         NativeDisk.ReadBytes(disk, buf, count);
     }
 
-    private static void WriteChunk(
-        Microsoft.Win32.SafeHandles.SafeFileHandle disk, long offset, byte[] buf, int count)
+    private static void WriteChunk(SafeFileHandle disk, long offset, byte[] buf, int count)
     {
         NativeDisk.SeekTo(disk, offset);
         NativeDisk.WriteBytes(disk, buf, count);
@@ -235,29 +400,16 @@ public sealed class RawDiskMoveService : IPartitionMoveService
 
     // ── Partition table update ────────────────────────────────────────────────
 
-    private static void UpdatePartitionTableEntry(
-        Microsoft.Win32.SafeHandles.SafeFileHandle disk,
-        long oldOffset, long newOffset)
+    private static void UpdatePartitionTableEntry(SafeFileHandle disk, long oldOffset, long newOffset)
     {
         var layout = NativeDisk.GetDriveLayout(disk);
-        int count  = NativeDisk.GetPartitionCount(layout);
 
-        bool found = false;
-        for (int i = 0; i < count; i++)
-        {
-            if (NativeDisk.ReadEntryStartingOffset(layout, i) == oldOffset)
-            {
-                NativeDisk.WriteEntryStartingOffset(layout, i, newOffset);
-                NativeDisk.SetEntryRewritePartition(layout, i);
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
+        if (FindEntry(layout, oldOffset) is not int i)
             throw new InvalidOperationException(
                 $"Could not find partition with offset {oldOffset} in the drive layout.");
 
+        NativeDisk.WriteEntryStartingOffset(layout, i, newOffset);
+        NativeDisk.SetEntryRewritePartition(layout, i);
         NativeDisk.SetDriveLayout(disk, layout);
 
         // Notify partmgr/VDS about the changed layout so that a subsequent

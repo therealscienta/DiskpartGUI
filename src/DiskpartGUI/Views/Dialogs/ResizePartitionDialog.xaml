@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:converters="clr-namespace:DiskpartGUI.Converters"
         Title="Resize Partition"
-        Width="440" Height="320"
+        Width="440" SizeToContent="Height"
         Background="#16213E"
         Foreground="#ECF0F1"
         WindowStartupLocation="CenterOwner"
@@ -56,7 +56,7 @@
                        Visibility="{Binding HasShrinkLimit, Converter={StaticResource BoolToVis}}"/>
 
             <TextBlock Foreground="#E74C3C" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"
-                       Text="Note: Extend requires contiguous unallocated space after the partition."/>
+                       Text="{Binding ExtendNote}"/>
         </StackPanel>
 
         <!-- Buttons -->

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Windows;
 using DiskpartGUI.ViewModels;
 
@@ -25,5 +26,19 @@ public partial class MovePartitionDialog : Window
                 Close();
             };
         }
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        // Closing mid-copy would leave the move running unseen and re-enable the main window,
+        // so another operation could start on the same disk. Make the user cancel first.
+        if (DataContext is MovePartitionViewModel { IsMoving: true })
+        {
+            e.Cancel = true;
+            MessageBox.Show(this,
+                "The partition is still being moved. Click Cancel to stop it safely, then close this window.",
+                "Move in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        base.OnClosing(e);
     }
 }

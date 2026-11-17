@@ -189,4 +189,16 @@ public sealed class DiskpartScriptBuilderTests
             .ShrinkDesired(100);
         Assert.Same(builder, result);
     }
+
+    [Fact]
+    public void Build_CleanScript_SelectsDiskThenCleans()
+    {
+        var script = Builder()
+            .SelectDisk(1)
+            .Clean()
+            .Build();
+
+        var lines = script.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(new[] { "select disk 1", "clean" }, lines);
+    }
 }

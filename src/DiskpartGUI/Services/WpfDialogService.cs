@@ -30,6 +30,12 @@ public sealed class WpfDialogService : IDialogService
         return dialog.ShowDialog();
     }
 
+    public bool? ShowWipeDiskDialog(WipeDiskViewModel vm)
+    {
+        var dialog = new WipeDiskDialog { DataContext = vm, Owner = Application.Current.MainWindow };
+        return dialog.ShowDialog();
+    }
+
     public void ShowAboutDialog()
     {
         var dialog = new AboutDialog { Owner = Application.Current.MainWindow };

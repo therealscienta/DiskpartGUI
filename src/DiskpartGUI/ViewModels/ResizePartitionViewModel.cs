@@ -48,10 +48,14 @@ public sealed class ResizePartitionViewModel : ViewModelBase
         ? $"Shrink by {DeltaMb:N0} MB"
         : $"Extend by {DeltaMb:N0} MB";
 
-    public ResizePartitionViewModel(long currentSizeMb, long availableFreeMb, long maxShrinkMb)
+    /// <summary>Shown under the slider: why Extend is unavailable, or the general extend note.</summary>
+    public string ExtendNote { get; }
+
+    public ResizePartitionViewModel(long currentSizeMb, long availableFreeMb, long maxShrinkMb, string? extendBlockedReason = null)
     {
         CurrentSizeMb = currentSizeMb;
-        MaxSizeMb     = currentSizeMb + availableFreeMb;
+        MaxSizeMb     = currentSizeMb + Math.Max(0, availableFreeMb);
+        ExtendNote    = extendBlockedReason ?? "Note: Extend requires contiguous unallocated space after the partition.";
         MaxShrinkMb   = maxShrinkMb;
         _newSizeMb    = currentSizeMb;
     }

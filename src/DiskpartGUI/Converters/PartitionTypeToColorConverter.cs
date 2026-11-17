@@ -18,7 +18,10 @@ public sealed class PartitionTypeToColorConverter : IValueConverter
     {
         var type = value?.ToString() ?? string.Empty;
 
-        if (type.Contains("IFS", StringComparison.OrdinalIgnoreCase) ||
+        // Checked before the "System" rule below: WMI reports ordinary MBR data partitions
+        // as "Installable File System", which would otherwise be colored as a system partition.
+        if (type.Contains("Installable File System", StringComparison.OrdinalIgnoreCase) ||
+            type.Contains("IFS", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("NTFS", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("Basic Data", StringComparison.OrdinalIgnoreCase))
             return NtfsBrush;
@@ -32,6 +35,7 @@ public sealed class PartitionTypeToColorConverter : IValueConverter
         if (type.Contains("System", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("OEM", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("Recovery", StringComparison.OrdinalIgnoreCase) ||
+            type.Contains("Reserved", StringComparison.OrdinalIgnoreCase) ||
             type.Contains("EFI", StringComparison.OrdinalIgnoreCase))
             return SystemBrush;
 
